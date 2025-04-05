@@ -189,18 +189,30 @@ document.addEventListener('DOMContentLoaded', function() {
         
         showLoading('Setting API Key...');
         
-        // In a real implementation, you would validate the API key with your backend
-        // For now, we'll just simulate success
-        setTimeout(() => {
+        fetch('/api/set-api-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_key: apiKey })
+        })
+        .then(response => response.json())
+        .then(data => {
             hideLoading();
-            showAlert(apiKeyStatus, 'API Key set successfully!', 'success');
-            apiKeyInput.disabled = true;
-            setApiKeyBtn.disabled = true;
-            editApiKeyBtn.disabled = false;
-            apiKeySet = true;
-            localStorage.setItem('apiKey', apiKey);
-            updateConversionButtons();
-        }, 500);
+            if (data.success) {
+                showAlert(apiKeyStatus, `API Key set successfully! Using model: ${data.model}`, 'success');
+                apiKeyInput.disabled = true;
+                setApiKeyBtn.disabled = true;
+                editApiKeyBtn.disabled = false;
+                apiKeySet = true;
+                localStorage.setItem('apiKey', apiKey);
+                updateConversionButtons();
+            } else {
+                showAlert(apiKeyStatus, `Lỗi: ${data.message}`, 'danger');
+            }
+        })
+        .catch(error => {
+            hideLoading();
+            showAlert(apiKeyStatus, `Lỗi: ${error.message}`, 'danger');
+        });
     }
     
     function editApiKey() {
@@ -300,55 +312,147 @@ document.addEventListener('DOMContentLoaded', function() {
         convertBtn.disabled = true;
         latexMcqBtn.disabled = true;
         
-        // Create FormData object and append file
+        // Create FormData object and append file and necessary data
         const formData = new FormData();
         formData.append('file', file);
         formData.append('hardware_id', hardwareIdInput.value);
+        formData.append('api_key', apiKeyInput.value);
+        formData.append('conversion_type', type);
         
         // Show loading overlay
         showLoading(`Converting ${file.name} to ${type === 'latex_mcq' ? 'LaTeX/MCQ' : 'text'}...`);
         
-        // Update progress bar to show indeterminate progress
-        overallProgressBar.style.width = '100%';
-        overallProgressBar.classList.add('progress-bar-striped', 'progress-bar-animated');
-        statusLabel.textContent = 'Status: Processing...';
+        // Start with progress at 0
+        overallProgressBar.style.width = '0%';
+        overallProgressBar.textContent = '0%';
+        statusLabel.textContent = 'Status: Uploading file...';
         
-        // Simulate conversion process with progress
-        let progress = 0;
-        const interval = setInterval(() => {
-            progress += 5;
-            if (progress > 90) {
-                clearInterval(interval);
+        // Upload file and start conversion
+        fetch('/upload', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                if (data.single_file === false) {
+                    // Handle multi-part file - start conversion
+                    statusLabel.textContent = 'Status: Processing multi-part file...';
+                    overallProgressBar.style.width = '30%';
+                    overallProgressBar.textContent = '30%';
+                    
+                    // Create progress bars for parts
+                    partsProgressContainer.style.display = 'block';
+                    createProgressBars(data.total_parts);
+                    
+                    // Start conversion with API key
+                    return fetch('/api/convert', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            type: type,
+                            api_key: apiKeyInput.value
+                        })
+                    });
+                } else {
+                    // Single file was already processed
+                    overallProgressBar.style.width = '100%';
+                    overallProgressBar.textContent = '100%';
+                    statusLabel.textContent = 'Status: Conversion complete';
+                    
+                    // Display result
+                    resultText.value = data.result || 'Conversion completed successfully.';
+                    wordBtn.disabled = false;
+                    
+                    // Re-enable conversion buttons
+                    convertBtn.disabled = false;
+                    latexMcqBtn.disabled = false;
+                    
+                    hideLoading();
+                    return null; // No need for further processing
+                }
+            } else {
+                throw new Error(data.error || 'File upload failed');
             }
-            overallProgressBar.style.width = `${progress}%`;
-        }, 500);
-        
-        setTimeout(() => {
-            // Simulate conversion complete
-            clearInterval(interval);
-            overallProgressBar.style.width = '100%';
-            overallProgressBar.classList.remove('progress-bar-striped', 'progress-bar-animated');
+        })
+        .then(response => {
+            if (!response) return null; // Skip if single file
+            return response.json();
+        })
+        .then(data => {
+            if (!data) return; // Skip if single file
             
-            // Show result
-            resultText.value = `This is simulated ${type} conversion result for ${file.name}.
-            
-In a real implementation, this would be the actual converted content from the PDF/Image.
-
-For a LaTeX example:
-$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$
-
-With proper backend implementation, this will be replaced with actual converted content.`;
-            
+            if (data.success) {
+                // Start polling for status of multi-part conversion
+                conversionId = data.conversion_id;
+                startPolling();
+            } else {
+                throw new Error(data.message || 'Conversion failed');
+            }
+        })
+        .catch(error => {
             hideLoading();
-            statusLabel.textContent = 'Status: Conversion complete';
+            statusLabel.textContent = `Status: Error - ${error.message}`;
+            overallProgressBar.style.width = '0%';
+            overallProgressBar.textContent = '0%';
+            alert(`Error: ${error.message}`);
             
-            // Enable buttons
+            // Re-enable conversion buttons
             convertBtn.disabled = false;
             latexMcqBtn.disabled = false;
-            wordBtn.disabled = false;
-            
-            showAlert(fileStatus, 'Conversion completed successfully.', 'success');
-        }, 3000);
+        });
+    }
+    
+    function startPolling() {
+        if (pollInterval) clearInterval(pollInterval);
+        
+        pollInterval = setInterval(() => {
+            fetch('/api/conversion-status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ conversion_id: conversionId })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    if (data.status === 'completed') {
+                        // Conversion completed
+                        clearInterval(pollInterval);
+                        hideLoading();
+                        resultText.value = data.result;
+                        statusLabel.textContent = `Status: Conversion completed successfully`;
+                        overallProgressBar.style.width = '100%';
+                        overallProgressBar.textContent = '100%';
+                        convertBtn.disabled = false;
+                        latexMcqBtn.disabled = false;
+                        wordBtn.disabled = false;
+                        
+                        // Update all progress bars to 100%
+                        for (let i = 0; i < totalParts; i++) {
+                            const progress = document.getElementById(`progress-${i}`);
+                            if (progress) {
+                                progress.style.width = '100%';
+                                progress.setAttribute('aria-valuenow', '100');
+                            }
+                        }
+                    }
+                    // For in_progress, we just keep polling
+                } else {
+                    clearInterval(pollInterval);
+                    hideLoading();
+                    alert(`Error: ${data.message}`);
+                    convertBtn.disabled = false;
+                    latexMcqBtn.disabled = false;
+                }
+            })
+            .catch(error => {
+                clearInterval(pollInterval);
+                hideLoading();
+                alert(`Error polling status: ${error.message}`);
+                convertBtn.disabled = false;
+                latexMcqBtn.disabled = false;
+            });
+        }, 5000); // Poll every 5 seconds
     }
     
     function convertToWord() {
@@ -360,11 +464,37 @@ With proper backend implementation, this will be replaced with actual converted 
         
         showLoading('Converting to Word...');
         
-        // Simulate Word conversion
-        setTimeout(() => {
+        fetch('/convert-to-word', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: content })
+        })
+        .then(response => {
             hideLoading();
-            alert('Word conversion is simulated. In a real implementation, this would trigger a download.');
-        }, 1500);
+            
+            if (response.ok) {
+                // Create a link to download the file
+                return response.blob().then(blob => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    a.download = 'converted_document.docx';
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                });
+            } else {
+                // Handle error
+                return response.json().then(data => {
+                    throw new Error(data.message || 'Word conversion failed');
+                });
+            }
+        })
+        .catch(error => {
+            hideLoading();
+            alert(`Error converting to Word: ${error.message}`);
+        });
     }
     
     function updateConversionButtons() {
