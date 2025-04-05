@@ -1,27 +1,34 @@
 import os
 import re
+import time
+import json
+import base64
 import hashlib
-import requests
-import tempfile
 import logging
-from flask import Flask, render_template, request, jsonify, session
+import shutil
+import tempfile
+import subprocess
+from io import BytesIO
+from flask import Flask, render_template, request, jsonify, session, send_file
 from werkzeug.utils import secure_filename
 import concurrent.futures
 import google.generativeai as genai
 from PyPDF2 import PdfReader, PdfWriter
-import subprocess
-from io import BytesIO
+import requests
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'p_convert_2025_secret_key')
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max upload size
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
 # Thread pool for concurrent processing
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+
+# Create upload folder if it doesn't exist
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 @app.route('/')
 def index():
@@ -69,10 +76,10 @@ def get_model_name():
 
 @app.route('/api/hardware-id', methods=['POST'])
 def get_hardware_id():
-    """API to generate hardware ID from the provided information"""
+    """API để tạo hardware ID từ thông tin gửi lên"""
     data = request.json
     if not data or not all(k in data for k in ('cpu_id', 'bios_serial', 'motherboard_serial')):
-        return jsonify({'success': False, 'error': 'Missing hardware information'}), 400
+        return jsonify({'success': False, 'error': 'Thiếu thông tin phần cứng'}), 400
     
     combined_info = f"{data['cpu_id']}|{data['bios_serial']}|{data['motherboard_serial']}"
     hardware_id = hashlib.md5(combined_info.encode()).hexdigest().upper()
@@ -86,7 +93,7 @@ def get_hardware_id():
     })
 
 def check_activation(hardware_id):
-    """Check if the hardware ID is activated"""
+    """Kiểm tra xem hardware ID có được kích hoạt không"""
     try:
         url = "https://raw.githubusercontent.com/thayphuctoan/pconvert/refs/heads/main/convert-special-1"
         response = requests.get(url, timeout=(10, 30))
@@ -97,147 +104,122 @@ def check_activation(hardware_id):
                 return True
         return False
     except Exception as e:
-        app.logger.error(f"Error checking activation: {str(e)}")
+        app.logger.error(f"Lỗi khi kiểm tra kích hoạt: {str(e)}")
         return False
 
-@app.route('/api/upload', methods=['POST'])
+@app.route('/upload', methods=['POST'])
 def upload_file():
-    """Handle file uploads (PDF or Image)"""
+    """Handle file upload and OCR processing"""
+    # Check for hardware ID and activation
+    hardware_id = request.form.get('hardware_id')
+    if not hardware_id or not check_activation(hardware_id):
+        return jsonify({
+            'success': False, 
+            'error': 'Phần mềm chưa được kích hoạt hoặc Hardware ID không hợp lệ.'
+        }), 403
+    
+    # Get spelling correction options
+    gemini_api_key = request.form.get('gemini_api_key', '')
+    spelling_correction = request.form.get('spelling_correction') == 'true'
+    
+    # Check if file was uploaded
     if 'file' not in request.files:
-        return jsonify({'success': False, 'message': 'No file part'}), 400
+        return jsonify({'success': False, 'error': 'Không có file nào được tải lên'}), 400
     
     file = request.files['file']
-    
     if file.filename == '':
-        return jsonify({'success': False, 'message': 'No selected file'}), 400
+        return jsonify({'success': False, 'error': 'Chưa chọn file'}), 400
     
-    if not ('api_key' in session and session['api_key']):
-        return jsonify({'success': False, 'message': 'API key not set'}), 400
-        
-    # Configure the API
-    genai.configure(api_key=session['api_key'])
-    
-    try:
-        # Save the file temporarily
+    if file and file.filename.lower().endswith('.pdf'):
+        # Save file temporarily
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(file_path)
         
-        # Store file path in session for later use
-        session['file_path'] = file_path
-        
-        # Check if it's a PDF
-        is_pdf = filename.lower().endswith('.pdf')
-        
-        # Process the file based on type
-        if is_pdf:
-            # Check PDF size and determine if it needs splitting
+        try:
+            # Check PDF page count
             pdf = PdfReader(file_path)
             total_pages = len(pdf.pages)
             
-            if total_pages <= 20:
-                # Handle as a single file
-                return jsonify({
-                    'success': True, 
-                    'message': 'File uploaded successfully',
-                    'filename': filename,
-                    'is_pdf': True,
-                    'single_file': True,
-                    'total_pages': total_pages
-                })
-            else:
-                # Split the PDF and return split info
-                split_files = split_pdf(file_path, pdf, total_pages)
-                session['split_files'] = split_files
-                return jsonify({
-                    'success': True, 
-                    'message': f'PDF split into {len(split_files)} parts',
-                    'filename': filename,
-                    'is_pdf': True,
-                    'single_file': False,
-                    'total_parts': len(split_files),
-                    'total_pages': total_pages
-                })
-        else:
-            # Handle as a single image file
-            return jsonify({
-                'success': True, 
-                'message': 'Image uploaded successfully',
-                'filename': filename,
-                'is_pdf': False,
-                'single_file': True
-            })
-    except Exception as e:
-        app.logger.error(f"Error processing upload: {str(e)}")
-        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
-
-def split_pdf(file_path, pdf, total_pages):
-    """Split a PDF into multiple smaller PDFs"""
-    chunk_size = 20
-    num_chunks = (total_pages + chunk_size - 1) // chunk_size
-    
-    base_name = os.path.splitext(file_path)[0]
-    split_files = []
-    
-    for i in range(num_chunks):
-        start_page = i * chunk_size
-        end_page = min((i + 1) * chunk_size, total_pages)
-        
-        output = PdfWriter()
-        for page in range(start_page, end_page):
-            output.add_page(pdf.pages[page])
-        
-        output_filename = f"{base_name}_part{i+1}.pdf"
-        with open(output_filename, "wb") as output_stream:
-            output.write(output_stream)
-        
-        split_files.append(output_filename)
-    
-    return split_files
-
-@app.route('/api/convert', methods=['POST'])
-def convert_file():
-    """Convert a file to text using Google Generative AI"""
-    data = request.json
-    conversion_type = data.get('type', 'text')  # 'text' or 'latex_mcq'
-    
-    if not ('api_key' in session and session['api_key']):
-        return jsonify({'success': False, 'message': 'API key not set'}), 400
-    
-    if not ('file_path' in session and session['file_path']):
-        return jsonify({'success': False, 'message': 'No file uploaded'}), 400
-    
-    # Configure the API
-    genai.configure(api_key=session['api_key'])
-    
-    # Get the appropriate prompt based on conversion type
-    prompt = get_prompt(conversion_type)
-    
-    try:
-        if 'split_files' in session and session['split_files']:
-            # Handle split files conversion
-            # Start async processing
-            future = executor.submit(
-                process_split_files, 
-                session['split_files'], 
-                prompt, 
-                conversion_type
-            )
+            # Page limit based on spelling correction feature
+            page_limit = 30 if spelling_correction else 100
             
-            # Store the future in session to check status later
-            session['conversion_future'] = id(future)
+            if total_pages > page_limit:
+                os.remove(file_path)
+                return jsonify({
+                    'success': False, 
+                    'error': f'File có {total_pages} trang, vượt quá giới hạn {page_limit} trang{"" if not spelling_correction else " khi bật tính năng sửa lỗi chính tả"}.'
+                }), 400
+            elif total_pages <= 0:
+                os.remove(file_path)
+                return jsonify({
+                    'success': False, 
+                    'error': 'Không thể đọc file PDF, vui lòng kiểm tra lại.'
+                }), 400
+                
+            # Process PDF with OCR
+            ocr_result = process_ocr(file_path)
+            
+            # Apply spelling correction if requested
+            if spelling_correction and gemini_api_key:
+                app.logger.info("Đang sửa lỗi chính tả với Gemini API...")
+                original_text = ocr_result["text"]
+                corrected_text = call_gemini_api(original_text, gemini_api_key)
+                
+                if not corrected_text.startswith("Lỗi:"):
+                    app.logger.info("Sửa lỗi chính tả thành công")
+                    ocr_result["text"] = corrected_text
+                else:
+                    app.logger.error(f"Lỗi khi sửa lỗi chính tả: {corrected_text}")
+            
+            # Create unique ID for this result
+            timestamp = int(time.time())
+            clean_filename = os.path.splitext(filename)[0].replace(" ", "_")
+            result_id = f"result_{clean_filename}_{timestamp}.json"
+            
+            # Save result to a temporary file
+            result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_id)
+            with open(result_path, 'w', encoding='utf-8') as f:
+                json.dump(ocr_result, f, ensure_ascii=False)
             
             return jsonify({
                 'success': True,
-                'message': 'Conversion started',
-                'conversion_id': id(future),
-                'total_parts': len(session['split_files'])
+                'filename': filename,
+                'page_count': total_pages,
+                'text': ocr_result['text'],
+                'image_count': len(ocr_result.get('images', {})),
+                'result_id': result_id
             })
-        else:
-            # Handle single file conversion
-            uploaded_file = genai.upload_file(session['file_path'])
             
-            # Get appropriate model
+        except Exception as e:
+            app.logger.error(f"Lỗi khi xử lý OCR: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+        finally:
+            # Clean up temporary file
+            if os.path.exists(file_path):
+                os.remove(file_path)
+    
+    return jsonify({'success': False, 'error': 'Loại file không được hỗ trợ, chỉ chấp nhận PDF'}), 400
+
+def process_ocr(file_path):
+    """Process OCR on a PDF file"""
+    # This is a simplified version - in actual implementation, you would use
+    # the OCR service of your choice (e.g., Google Cloud Vision, Azure OCR, etc.)
+    
+    try:
+        app.logger.info(f"Xử lý OCR cho file: {file_path}")
+        
+        # Initialize OCR results
+        ocr_result = {
+            "text": "",
+            "images": {}
+        }
+        
+        # Configure the Gemini API
+        if 'api_key' in session and session['api_key']:
+            genai.configure(api_key=session['api_key'])
+            
+            # Get model
             model_name = get_model_name()
             generation_config = {
                 "temperature": 0.1,
@@ -247,128 +229,192 @@ def convert_file():
             }
             model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
             
-            # Generate content
-            response = model.generate_content([uploaded_file, prompt])
-            result = response.text
+            # Execute OCR with Gemini
+            uploaded_file = genai.upload_file(file_path)
+            prompt = """
+            Nhận diện văn bản trong file PDF này, bao gồm cả công thức toán học. 
+            Hãy cấu trúc công thức toán học trong dấu $ (inline) hoặc $$ (block).
+            Giữ nguyên định dạng và bố cục càng nhiều càng tốt.
+            Đối với các hình ảnh, hãy chỉ ra vị trí của chúng bằng [HÌNH].
+            """
             
-            # Process the result if needed
-            if conversion_type == 'text':
-                result = process_formulas(result)
-                
-            return jsonify({
-                'success': True,
-                'message': 'Conversion completed successfully',
-                'result': result
-            })
+            response = model.generate_content([uploaded_file, prompt])
+            ocr_result["text"] = response.text
+            
+            # For demo purposes, add a sample image
+            image_id = "sample_image_1"
+            # This would be base64 data in a real implementation
+            ocr_result["images"][image_id] = "dummy_base64_data"
+            
+            # Replace [HÌNH] with image references
+            ocr_result["text"] = ocr_result["text"].replace("[HÌNH]", f"[HÌNH: {image_id}]")
+            
+            return ocr_result
+        else:
+            return {"text": "API key chưa được cấu hình", "images": {}}
     except Exception as e:
-        app.logger.error(f"Error during conversion: {str(e)}")
-        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+        app.logger.error(f"Lỗi trong quá trình OCR: {str(e)}")
+        raise
 
-def process_split_files(split_files, prompt, conversion_type):
-    """Process multiple PDF parts and combine the results"""
-    results = {}
-    model_name = get_model_name()
-    generation_config = {
-        "temperature": 0.1,
-        "top_p": 0.95,
-        "top_k": 40,
-        "max_output_tokens": 65536,
-    }
-    model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
-    
-    # Process each file sequentially (could be made concurrent with careful handling)
-    for i, file_path in enumerate(split_files):
-        try:
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    uploaded_file = genai.upload_file(file_path)
-                    response = model.generate_content([uploaded_file, prompt])
-                    results[i] = response.text
-                    break
-                except Exception as e:
-                    if "429" in str(e) and attempt < max_retries - 1:
-                        # Rate limit error, wait and retry
-                        import time
-                        time.sleep(60)  # Wait 60 seconds before retry
-                    else:
-                        raise e
-        except Exception as e:
-            results[i] = f"Error processing part {i+1}: {str(e)}"
-    
-    # Combine results
-    combined_text = "\n\n--- End of Part ---\n\n".join([results[i] for i in sorted(results.keys())])
-    
-    # Process formulas if needed
-    if conversion_type == 'text':
-        combined_text = process_formulas(combined_text)
-    
-    # Clean up temporary files
-    for file_path in split_files:
-        try:
-            os.remove(file_path)
-        except:
-            pass
-    
-    return combined_text
+def call_gemini_api(original_text, gemini_key):
+    """
+    Gọi Gemini API để hiệu đính lỗi chính tả và ngữ pháp tiếng Việt.
+    """
+    try:
+        if not gemini_key:
+            return "Lỗi: Chưa có Gemini API Key"
+        
+        GEMINI_API_URL = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-2.0-flash:generateContent?key=" + gemini_key
+        )
+        
+        prompt = (
+            "Please help me correct Vietnamese spelling and grammar in the following text. "
+            "IMPORTANT: Do not change any image paths, LaTeX formulas, or Vietnamese diacritical marks. "
+            "Return only the corrected text with the same structure and markdown formatting:\n\n"
+            f"{original_text}"
+        )
+        
+        payload = {
+            "contents": [{
+                "parts": [{
+                    "text": prompt
+                }]
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 8192,
+            }
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        resp = requests.post(GEMINI_API_URL, json=payload, headers=headers, timeout=(30, 300))
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            if "candidates" in data and len(data["candidates"]) > 0:
+                candidate = data["candidates"][0]
+                if "content" in candidate and "parts" in candidate["content"]:
+                    corrected_text = candidate["content"]["parts"][0].get("text", "")
+                    if corrected_text.strip():
+                        return corrected_text
+            return "Lỗi: Không thể trích xuất được kết quả từ Gemini API."
+        else:
+            return f"Lỗi: Gemini API - HTTP {resp.status_code} - {resp.text}"
+    except Exception as e:
+        return f"Lỗi: Gọi Gemini API thất bại: {str(e)}"
 
-@app.route('/api/conversion-status', methods=['POST'])
-def check_conversion_status():
-    """Check the status of a conversion job"""
-    data = request.json
-    conversion_id = data.get('conversion_id')
+@app.route('/results/<result_id>', methods=['GET'])
+def get_result(result_id):
+    """Get saved OCR results"""
+    result_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(result_id))
     
-    if not conversion_id:
-        return jsonify({'success': False, 'message': 'Conversion ID required'}), 400
+    app.logger.info(f"Đang tìm kết quả: {result_path}")
+    
+    if not os.path.exists(result_path):
+        app.logger.error(f"Không tìm thấy kết quả tại đường dẫn: {result_path}")
+        return jsonify({'success': False, 'error': 'Không tìm thấy kết quả'}), 404
     
     try:
-        # Iterate through all futures to find the matching one
-        for future in concurrent.futures._futures.futures_instances:
-            if id(future) == int(conversion_id):
-                if future.done():
-                    result = future.result()
-                    return jsonify({
-                        'success': True,
-                        'status': 'completed',
-                        'result': result
-                    })
-                else:
-                    return jsonify({
-                        'success': True,
-                        'status': 'in_progress'
-                    })
+        with open(result_path, 'r', encoding='utf-8') as f:
+            result = json.load(f)
         
         return jsonify({
-            'success': False,
-            'message': 'Conversion not found or expired'
-        }), 404
+            'success': True,
+            'text': result['text'],
+            'image_count': len(result.get('images', {})),
+            'image_ids': list(result.get('images', {}).keys())
+        })
     except Exception as e:
-        app.logger.error(f"Error checking conversion status: {str(e)}")
-        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+        app.logger.error(f"Lỗi khi đọc kết quả: {str(e)}")
+        return jsonify({'success': False, 'error': f'Lỗi khi đọc kết quả: {str(e)}'}), 500
 
-@app.route('/api/word-convert', methods=['POST'])
-def convert_to_word():
-    """Convert text to a Word document using pandoc"""
-    data = request.json
-    content = data.get('content')
+@app.route('/images/<result_id>/<image_id>', methods=['GET'])
+def get_image(result_id, image_id):
+    """Get image from OCR results"""
+    result_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(result_id))
     
-    if not content:
-        return jsonify({'success': False, 'message': 'No content provided'}), 400
+    app.logger.info(f"Đang tìm kết quả để lấy hình ảnh: {result_path}, hình ảnh: {image_id}")
+    
+    if not os.path.exists(result_path):
+        app.logger.error(f"Không tìm thấy kết quả tại đường dẫn: {result_path}")
+        return jsonify({'success': False, 'error': 'Không tìm thấy kết quả'}), 404
     
     try:
-        # Create temporary files
-        with tempfile.NamedTemporaryFile(suffix='.md', delete=False) as md_file:
-            md_path = md_file.name
-            content = content.replace('\n', '\n\n')
-            md_file.write(content.encode('utf-8'))
+        with open(result_path, 'r', encoding='utf-8') as f:
+            result = json.load(f)
         
-        with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as docx_file:
-            docx_path = docx_file.name
+        if image_id not in result.get('images', {}):
+            app.logger.error(f"Không tìm thấy hình ảnh {image_id} trong kết quả")
+            return jsonify({'success': False, 'error': 'Không tìm thấy hình ảnh'}), 404
         
-        # Run pandoc
+        # Get image data
+        img_data = result['images'][image_id]
+        if "," in img_data:
+            img_data = img_data.split(",", 1)[1]
+        
+        # For demonstration, we'll return a placeholder image
+        placeholder_img = BytesIO()
+        placeholder_img.write(base64.b64decode(img_data))
+        placeholder_img.seek(0)
+        
+        return send_file(placeholder_img, mimetype='image/jpeg')
+    except Exception as e:
+        app.logger.error(f"Lỗi khi xử lý hình ảnh: {str(e)}")
+        return jsonify({'success': False, 'error': f'Lỗi khi xử lý hình ảnh: {str(e)}'}), 500
+
+@app.route('/export/word/<result_id>', methods=['GET'])
+def export_to_word(result_id):
+    """Export OCR results to Word document"""
+    export_type = request.args.get('type', 'word-image')  # Default: Word with images
+    result_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(result_id))
+    
+    app.logger.info(f"Đang xuất file loại: {export_type} từ: {result_path}")
+    
+    if not os.path.exists(result_path):
+        app.logger.error(f"Không tìm thấy kết quả tại đường dẫn: {result_path}")
+        return jsonify({'success': False, 'error': 'Không tìm thấy kết quả'}), 404
+    
+    try:
+        # Read OCR result
+        with open(result_path, 'r', encoding='utf-8') as f:
+            result = json.load(f)
+        
+        # Create temporary directory for export
+        timestamp = int(time.time())
+        export_dir_name = f"word_export_{timestamp}"
+        export_path = os.path.join(app.config['UPLOAD_FOLDER'], export_dir_name)
+        os.makedirs(export_path, exist_ok=True)
+        
+        # Process text for export
+        markdown_content = result['text']
+        
+        # Process images if needed
+        if export_type in ['word-image', 'zip']:
+            images_dir = os.path.join(export_path, "images")
+            os.makedirs(images_dir, exist_ok=True)
+            
+            # Save images to files
+            for img_id, base64_data in result.get('images', {}).items():
+                if "," in base64_data:
+                    base64_data = base64_data.split(",", 1)[1]
+                
+                img_path = os.path.join(images_dir, f"{img_id}.jpg")
+                with open(img_path, 'wb') as img_file:
+                    img_file.write(base64.b64decode(base64_data))
+        
+        # Save markdown content
+        markdown_path = os.path.join(export_path, "content.md")
+        with open(markdown_path, 'w', encoding='utf-8') as md_file:
+            md_file.write(markdown_content)
+        
+        # Convert to Word with pandoc
+        docx_path = os.path.join(export_path, "ocr_result.docx")
+        
         pandoc_command = [
             "pandoc",
-            md_path,
+            markdown_path,
             "-o", docx_path,
             "--from", "markdown",
             "--to", "docx",
@@ -377,91 +423,38 @@ def convert_to_word():
         
         subprocess.run(pandoc_command, check=True)
         
-        # Read the docx file and return it
-        with open(docx_path, 'rb') as f:
-            docx_data = f.read()
+        # Create ZIP file with results
+        zip_filename = f"ocr_result_{timestamp}.zip"
+        zip_path = os.path.join(app.config['UPLOAD_FOLDER'], zip_filename)
         
-        # Clean up temporary files
-        os.unlink(md_path)
-        os.unlink(docx_path)
+        # Create ZIP archive
+        shutil.make_archive(
+            os.path.splitext(zip_path)[0],
+            'zip',
+            app.config['UPLOAD_FOLDER'],
+            export_dir_name
+        )
         
-        return jsonify({
-            'success': True,
-            'message': 'Conversion to Word successful',
-            'docx_data': docx_data.hex()  # Send as hex string to be decoded on the client side
-        })
+        # Return ZIP file
+        return send_file(
+            zip_path,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=zip_filename
+        )
     except Exception as e:
-        app.logger.error(f"Error converting to Word: {str(e)}")
-        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
-
-def get_prompt(conversion_type):
-    """Get the appropriate prompt based on conversion type"""
-    if conversion_type == 'latex_mcq':
-        return """
-        Hãy nhận diện và gõ lại [CHÍNH XÁC] PDF thành văn bản, tất cả công thức Toán Latex, bọc trong dấu $
-        [TUYỆT ĐỐI] không thêm nội dung khác ngoài nội dung PDF, [CHỈ ĐƯỢC PHÉP] gõ lại nội dung PDF thành văn bản.
-        1. Chuyển bảng (table) thông thường sang cấu trúc như này cho tôi, còn bảng biến thiên thì không chuyển
-        \\begin{tabular}{|c|c|c|c|c|c|}
-        \\hline$x$ & -2 & -1 & 0 & 1 & 2 \\\\
-        \\hline$y=x^2$ & 4 & 1 & 0 & 1 & 4 \\\\
-        \\hline
-        \\end{tabular}
-        2. Hãy bỏ cấu trúc in đậm của Markdown trong kết quả (bỏ dấu *)
-        3. Chuyển nội dung văn bản trong file sang cấu trúc Latex với câu hỏi trắc nghiệm
-        3.1 Câu hỏi trắc nghiệm không lời giải (bắt đầu là Câu 1. hoặc Câu 1:) sẽ chuyển như sau:
-        Câu 1: Với $x$ là số thực dương tùy ý, $x \\sqrt{x^{5}}$ bằng
-        A. $x^{\\frac{2}{3}}$.
-        B. $x^{3}$.
-        C. $x^{\\frac{7}{2}}$.
-        D. $x^{\\frac{3}{5}}$.
-        Câu hỏi sau khi chuyển sang câu hỏi trắc nghiệm theo cấu trúc ex_test như sau:
-        \\begin{ex}%Câu 1
-         Với $x$ là số thực dương tùy ý, $x \\sqrt{x^5}$ bằng
-        \\choice
-        { $x^{\\dfrac{2}{3}}$}
-        { $x^3$}
-        { $x^{\\dfrac{7}{2}}$}
-        { $x^{\\dfrac{3}{5}}$}
-        \\end{ex}
-        3.2 Câu hỏi trắc nghiệm có lời giải (bắt đầu là Câu 1. hoặc Câu 1:) sẽ chuyển như sau:
-        \\begin{ex} % Câu 1.
-        Hàm số nào dưới đây có bảng biến thiên như sau
-        \\choice
-        {\\True $\\dfrac{x+2}{x-1}$}
-        { $\\dfrac{-x+2}{x-1}$}
-        { $\\dfrac{x+2}{x+1}$}
-        { $\\dfrac{x-2}{x-1}$}
-        \\loigiai{
-        Quan sát bảng biến thiên ta thấy:\\\\
-        }
-        \\end{ex}
-        4. Chuyển nội dung văn bản trong file sang cấu trúc Latex với bài tập tự luận
-        \\begin{bt} % Bài 1.
-        Tìm 2 số $ x$ và $ y$ biết: $\\dfrac{x}{6}=\\dfrac{y}{7}$ và $ x+y=26$.
-        \\loigiai{
-        Áp dụng tính chất dãy tỉ số bằng nhau, ta có: $\\dfrac{x}{6}=\\dfrac{y}{7}=\\dfrac{x+y}{6+7}=\\dfrac{26}{13}=2$
-        }
-        \\end{bt}
-        """
-    else:  # default to text conversion
-        return """
-        Hãy nhận diện và gõ lại [CHÍNH XÁC] PDF thành văn bản, tất cả công thức Toán Latex, bọc trong dấu $
-        [TUYỆT ĐỐI] không thêm nội dung khác ngoài nội dung PDF, [CHỈ ĐƯỢC PHÉP] gõ lại nội dung PDF thành văn bản.
-        """
-
-def process_formulas(text):
-    """Process mathematical formulas in the text"""
-    def process_math_content(match):
-        content = match.group(1)
-        content = content.replace('π', '\\pi')
-        content = re.sub(r'√(\d+)', r'\\sqrt{\1}', content)
-        content = re.sub(r'√\{([^}]+)\}', r'\\sqrt{\1}', content)
-        content = content.replace('≠', '\\neq')
-        content = content.replace('*', '')
-        return f'${content}$'
-
-    text = re.sub(r'\$(.+?)\$', process_math_content, text, flags=re.DOTALL)
-    return text
+        app.logger.error(f"Lỗi khi xuất file Word: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        # Clean up temporary files
+        try:
+            if 'export_path' in locals() and os.path.exists(export_path):
+                shutil.rmtree(export_path)
+            
+            if 'zip_path' in locals() and os.path.exists(zip_path):
+                os.remove(zip_path)
+        except Exception as cleanup_error:
+            app.logger.error(f"Lỗi khi dọn dẹp file tạm: {str(cleanup_error)}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
