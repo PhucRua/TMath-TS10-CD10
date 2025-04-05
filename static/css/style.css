@@ -1,24 +1,73 @@
-/* Basic styling for the application */
-body {
+.container { 
+    max-width: 900px; 
+}
+
+#resultContainer { 
+    display: none; 
+}
+
+#resultText { 
+    height: 400px; 
+    overflow-y: auto; 
+}
+
+#logArea { 
+    height: 150px; 
+    overflow-y: auto; 
+    background-color: #f8f9fa; 
+    padding: 10px; 
+    border-radius: 5px; 
+}
+
+.progress { 
+    height: 25px; 
+}
+
+.hardware-id-container { 
+    border: 1px solid #dee2e6; 
+    border-radius: 5px; 
+    padding: 15px; 
+    margin-bottom: 20px; 
+}
+
+.card-body img { 
+    max-width: 100%; 
+}
+
+.social-icon {
+    font-size: 1.5rem;
+    margin-right: 10px;
+    color: #6c757d;
+    transition: color 0.3s;
+}
+
+.social-icon:hover {
+    color: #0d6efd;
+}
+
+.tab-content {
+    padding-top: 20px;
+}
+
+.author-card {
+    border: none;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+.author-card .card-header {
     background-color: #f8f9fa;
-    padding-bottom: 2rem;
+    border-bottom: none;
 }
 
-.container {
-    max-width: 800px;
-    margin-top: 30px;
+.nav-tabs .nav-link {
+    font-weight: 500;
 }
 
-#resultText {
-    min-height: 200px;
-    font-family: monospace;
-    white-space: pre-wrap;
+.nav-tabs .nav-link.active {
+    border-bottom: 3px solid #0d6efd;
 }
 
-.progress-container {
-    margin-bottom: 10px;
-}
-
+/* Loading overlay */
 .loading-overlay {
     position: fixed;
     top: 0;
@@ -33,14 +82,7 @@ body {
     z-index: 1000;
 }
 
+/* Styling for the progress bars */
 .part-progress {
     margin-bottom: 10px;
-}
-
-/* Badge styling */
-.badge {
-    font-size: 1rem;
-    padding: 0.5rem;
-    width: 100%;
-    text-align: center;
 }
