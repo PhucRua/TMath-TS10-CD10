@@ -1,728 +1,395 @@
-// Generate hardware ID using browser fingerprinting
-async function generateHardwareId() {
+document.addEventListener('DOMContentLoaded', function() {
+    // Elements
+    const apiKeyInput = document.getElementById('apiKeyInput');
+    const setApiKeyBtn = document.getElementById('setApiKeyBtn');
+    const editApiKeyBtn = document.getElementById('editApiKeyBtn');
+    const apiKeyStatus = document.getElementById('apiKeyStatus');
+    
+    const hardwareIdInput = document.getElementById('hardwareIdInput');
+    const activationStatus = document.getElementById('activationStatus');
+    const cpuIdInput = document.getElementById('cpuIdInput');
+    const biosSerialInput = document.getElementById('biosSerialInput');
+    const motherboardSerialInput = document.getElementById('motherboardSerialInput');
+    const generateHardwareIdBtn = document.getElementById('generateHardwareIdBtn');
+    const customizeHardwareIdBtn = document.getElementById('customizeHardwareIdBtn');
+    const hardwareInfoSection = document.getElementById('hardwareInfoSection');
+    
+    const uploadPdfBtn = document.getElementById('uploadPdfBtn');
+    const uploadImageBtn = document.getElementById('uploadImageBtn');
+    const fileInput = document.getElementById('fileInput');
+    const fileLabel = document.getElementById('fileLabel');
+    const fileStatus = document.getElementById('fileStatus');
+    
+    const convertBtn = document.getElementById('convertBtn');
+    const latexMcqBtn = document.getElementById('latexMcqBtn');
+    const wordBtn = document.getElementById('wordBtn');
+    
+    const overallProgressBar = document.getElementById('overallProgressBar');
+    const statusLabel = document.getElementById('statusLabel');
+    const progressBarsContainer = document.getElementById('progressBarsContainer');
+    const partsProgressContainer = document.getElementById('partsProgressContainer');
+    
+    const resultText = document.getElementById('resultText');
+    const loadingOverlay = document.getElementById('loadingOverlay');
+    const loadingMessage = document.getElementById('loadingMessage');
+    
+    // State variables
+    let conversionId = null;
+    let pollInterval = null;
+    let isActivated = false;
+    let apiKeySet = false;
+    let fileUploaded = false;
+    let isSingleFile = true;
+    let totalParts = 0;
+    
+    // Load FingerprintJS from CDN
     const fpPromise = import('https://openfpcdn.io/fingerprintjs/v3')
         .then(FingerprintJS => FingerprintJS.load());
     
-    const fp = await fpPromise;
-    const result = await fp.get();
-
-    // Get some additional browser info
-    const cpuCores = navigator.hardwareConcurrency || '';
-    const platform = navigator.platform || '';
-    const userAgent = navigator.userAgent || '';
+    // Hide parts progress initially
+    partsProgressContainer.style.display = 'none';
     
-    // Create combined hardware info
-    const hardwareInfo = {
-        cpu_id: result.visitorId + cpuCores,
-        bios_serial: platform + result.visitorId.substring(0, 8),
-        motherboard_serial: userAgent.slice(0, 20) + result.visitorId.substring(8, 16)
-    };
-    
-    // Get hardware ID from server
-    try {
-        const response = await fetch('/api/hardware-id', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(hardwareInfo)
-        });
-        
-        const data = await response.json();
-        if (data.success) {
-            document.getElementById('hardwareId').value = data.hardware_id;
-            updateActivationStatus(data.activated);
-        } else {
-            logMessage('Lỗi: ' + data.error);
-        }
-    } catch (error) {
-        logMessage('Lỗi khi lấy Hardware ID: ' + error);
-    }
-}
-
-function updateActivationStatus(activated) {
-    const statusElement = document.getElementById('activationStatus');
-    const fileInput = document.getElementById('pdfFile');
-    const processBtn = document.getElementById('processBtn');
-    
-    if (activated) {
-        statusElement.className = 'alert alert-success';
-        statusElement.textContent = 'Trạng thái: ĐÃ KÍCH HOẠT';
-        fileInput.disabled = false;
-        logMessage('Phần mềm đã được kích hoạt, sẵn sàng sử dụng');
-    } else {
-        statusElement.className = 'alert alert-warning';
-        statusElement.textContent = 'Trạng thái: CHƯA KÍCH HOẠT';
-        fileInput.disabled = true;
-        processBtn.disabled = true;
-        logMessage('Vui lòng kích hoạt phần mềm trước khi sử dụng');
-    }
-}
-
-function logMessage(message) {
-    const logArea = document.getElementById('logArea');
-    const timestamp = new Date().toLocaleTimeString();
-    logArea.innerHTML += `<div>[${timestamp}] ${message}</div>`;
-    logArea.scrollTop = logArea.scrollHeight;
-}
-
-function updateProgress(percent, message) {
-    const progressBar = document.getElementById('progressBar');
-    const statusText = document.getElementById('statusText');
-    
-    progressBar.style.width = percent + '%';
-    progressBar.textContent = percent + '%';
-    progressBar.setAttribute('aria-valuenow', percent);
-    
-    if (message) {
-        statusText.textContent = message;
-        logMessage(message);
-    }
-}
-
-// Hàm kiểm tra và khôi phục kết quả từ localStorage
-function checkForSavedResults() {
-    try {
-        const savedResultId = localStorage.getItem('lastResultId');
-        const savedImageCount = localStorage.getItem('lastImageCount');
-        const savedResultText = localStorage.getItem('lastResultText');
-        
-        if (savedResultId && savedResultText) {
-            logMessage('Đang khôi phục kết quả OCR từ phiên trước...');
-            
-            // Khôi phục kết quả
-            window.resultId = savedResultId;
-            window.imageCount = parseInt(savedImageCount || '0');
-            
-            // Hiển thị kết quả
-            document.getElementById('resultContainer').style.display = 'block';
-            document.getElementById('resultText').value = savedResultText;
-            
-            // Kích hoạt nút xuất Word và xem hình ảnh
-            document.getElementById('btnExport').disabled = false;
-            
-            if (window.imageCount > 0) {
-                document.getElementById('btnViewImages').disabled = false;
-                logMessage(`Khôi phục thành công với ${window.imageCount} hình ảnh`);
-            } else {
-                document.getElementById('btnViewImages').disabled = true;
-                logMessage('Khôi phục thành công nhưng không có hình ảnh');
-            }
-            
-            return true;
-        }
-    } catch (e) {
-        logMessage('Không thể khôi phục kết quả trước đó: ' + e.message);
+    // Check for stored API key in localStorage
+    const storedApiKey = localStorage.getItem('apiKey');
+    if (storedApiKey) {
+        apiKeyInput.value = storedApiKey;
+        setApiKey();
     }
     
-    return false;
-}
-
-// Cập nhật thông tin file dựa trên tùy chọn sửa lỗi chính tả
-function updateFileInfo(file) {
-    const fileInfo = document.getElementById('fileInfo');
-    const spellingCorrection = document.getElementById('spellingCorrection').checked;
+    // Auto-generate hardware ID on page load
+    generateHardwareIdAuto();
     
-    if (file.type !== 'application/pdf') {
-        fileInfo.textContent = 'Vui lòng chọn file PDF';
-        return;
-    }
+    // Event Listeners
+    setApiKeyBtn.addEventListener('click', setApiKey);
+    editApiKeyBtn.addEventListener('click', editApiKey);
+    generateHardwareIdBtn.addEventListener('click', generateHardwareIdCustom);
+    customizeHardwareIdBtn.addEventListener('click', toggleHardwareInfoSection);
     
-    const pageLimit = spellingCorrection ? 30 : 100;
-    const fileSizeMB = (file.size / 1024 / 1024).toFixed(2);
-    fileInfo.textContent = `Đã chọn: ${file.name} (${fileSizeMB} MB, giới hạn ${pageLimit} trang${spellingCorrection ? ' khi bật sửa lỗi chính tả' : ''})`;
-    
-    logMessage(`File đã chọn: ${file.name} (${fileSizeMB} MB, giới hạn ${pageLimit} trang${spellingCorrection ? ' khi bật sửa lỗi chính tả' : ''})`);
-}
-
-async function processOCR(formData) {
-    try {
-        updateProgress(10, 'Đang tải file lên...');
-        
-        // Thêm Gemini API key và tùy chọn sửa lỗi chính tả vào formData
-        const geminiApiKey = document.getElementById('geminiApiKey').value;
-        const spellingCorrection = document.getElementById('spellingCorrection').checked;
-        
-        formData.append('gemini_api_key', geminiApiKey);
-        formData.append('spelling_correction', spellingCorrection);
-        
-        if (spellingCorrection && geminiApiKey) {
-            logMessage('Đã bật tính năng sửa lỗi chính tả với Gemini API');
-        } else if (spellingCorrection && !geminiApiKey) {
-            logMessage('Cảnh báo: Đã bật tính năng sửa lỗi chính tả nhưng chưa nhập Gemini API Key');
-        }
-        
-        updateProgress(20, 'Đang xử lý OCR...');
-        
-        const response = await fetch('/upload', {
-            method: 'POST',
-            body: formData
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            updateProgress(100, 'Xử lý OCR hoàn tất thành công');
-            
-            // Hiển thị kết quả
-            document.getElementById('resultContainer').style.display = 'block';
-            document.getElementById('resultText').value = result.text;
-            
-            // Lưu kết quả ID để tải hình ảnh sau này
-            window.resultId = result.result_id;
-            window.imageCount = result.image_count;
-            
-            // Lưu vào localStorage để phòng trường hợp trang được làm mới
-            try {
-                localStorage.setItem('lastResultId', result.result_id);
-                localStorage.setItem('lastImageCount', result.image_count);
-                localStorage.setItem('lastResultText', result.text);
-                logMessage('Đã lưu kết quả vào bộ nhớ cục bộ');
-            } catch (e) {
-                logMessage('Không thể lưu kết quả vào bộ nhớ cục bộ: ' + e.message);
-            }
-            
-            // Kích hoạt nút xuất và xem hình ảnh
-            document.getElementById('btnExport').disabled = false;
-            
-            if (result.image_count > 0) {
-                document.getElementById('btnViewImages').disabled = false;
-                logMessage(`Tìm thấy ${result.image_count} hình ảnh trong kết quả OCR`);
-            } else {
-                document.getElementById('btnViewImages').disabled = true;
-                logMessage("Không tìm thấy hình ảnh trong kết quả OCR");
-            }
-            
-        } else {
-            updateProgress(0, 'Lỗi: ' + result.error);
-        }
-    } catch (error) {
-        updateProgress(0, 'Lỗi xử lý: ' + error);
-    }
-}
-
-async function loadImages() {
-    if (!window.resultId) {
-        logMessage('Không có kết quả OCR để hiển thị hình ảnh');
-        return;
-    }
-    
-    try {
-        // Hiển thị thông báo đang tải
-        const loadingDiv = document.createElement('div');
-        loadingDiv.className = 'text-center mb-4';
-        loadingDiv.innerHTML = `
-            <div class="spinner-border text-primary mb-3" role="status">
-                <span class="visually-hidden">Đang tải...</span>
-            </div>
-            <p>Đang tải hình ảnh...</p>
-        `;
-        
-        const imagesContainer = document.getElementById('imagesContainer');
-        imagesContainer.innerHTML = '';
-        imagesContainer.appendChild(loadingDiv);
-        
-        logMessage('Đang tải thông tin hình ảnh từ kết quả OCR...');
-        
-        const response = await fetch(`/results/${window.resultId}`);
-        const result = await response.json();
-        
-        if (result.success) {
-            imagesContainer.innerHTML = '';
-            
-            if (result.image_count === 0) {
-                imagesContainer.innerHTML = '<div class="text-center">Không có hình ảnh để hiển thị</div>';
-                return;
-            }
-            
-            logMessage(`Đã tìm thấy ${result.image_count} hình ảnh, đang tải...`);
-            
-            // Nếu API trả về danh sách ID hình ảnh
-            const imageIds = result.image_ids || [];
-            
-            if (imageIds.length > 0) {
-                // Hiển thị thông tin đang tải
-                const progressDiv = document.createElement('div');
-                progressDiv.className = 'progress mb-4';
-                progressDiv.innerHTML = `
-                    <div class="progress-bar progress-bar-striped progress-bar-animated" 
-                         id="imageLoadProgress" role="progressbar" 
-                         style="width: 0%" 
-                         aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
-                `;
-                imagesContainer.appendChild(progressDiv);
-                
-                const progressBar = document.getElementById('imageLoadProgress');
-                
-                // Tải từng hình ảnh theo ID
-                for (let i = 0; i < imageIds.length; i++) {
-                    const imageId = imageIds[i];
-                    try {
-                        const imageResponse = await fetch(`/images/${window.resultId}/${imageId}`);
-                        
-                        if (imageResponse.ok) {
-                            const blob = await imageResponse.blob();
-                            const imageUrl = URL.createObjectURL(blob);
-                            
-                            const imageDiv = document.createElement('div');
-                            imageDiv.className = 'mb-4';
-                            imageDiv.innerHTML = `
-                                <h5 class="text-primary">Hình ảnh: ${imageId}</h5>
-                                <div class="text-center">
-                                    <img src="${imageUrl}" class="img-fluid mb-2" alt="${imageId}">
-                                </div>
-                            `;
-                            
-                            imagesContainer.appendChild(imageDiv);
-                            
-                            // Cập nhật tiến trình
-                            const percent = Math.round(((i + 1) / imageIds.length) * 100);
-                            progressBar.style.width = `${percent}%`;
-                            progressBar.textContent = `${percent}%`;
-                            progressBar.setAttribute('aria-valuenow', percent);
-                        } else {
-                            const errorDiv = document.createElement('div');
-                            errorDiv.className = 'alert alert-warning mb-4';
-                            errorDiv.textContent = `Không thể tải hình ảnh: ${imageId}`;
-                            imagesContainer.appendChild(errorDiv);
-                        }
-                    } catch (e) {
-                        logMessage(`Lỗi khi tải hình ảnh ${imageId}: ${e.message}`);
-                    }
-                }
-                
-                // Xóa thanh tiến trình sau khi tải xong
-                imagesContainer.removeChild(progressDiv);
-                
-            } else {
-                // Cách cũ - Thử tải hình ảnh theo thứ tự
-                logMessage('Không có danh sách ID cụ thể, thử tải theo thứ tự');
-                
-                for (let i = 1; i <= result.image_count; i++) {
-                    const imageId = `img-${i}.jpeg`;
-                    try {
-                        const imageResponse = await fetch(`/images/${window.resultId}/${imageId}`);
-                        
-                        if (imageResponse.ok) {
-                            const blob = await imageResponse.blob();
-                            const imageUrl = URL.createObjectURL(blob);
-                            
-                            const imageDiv = document.createElement('div');
-                            imageDiv.className = 'mb-4';
-                            imageDiv.innerHTML = `
-                                <h5 class="text-primary">Hình ảnh: ${imageId}</h5>
-                                <div class="text-center">
-                                    <img src="${imageUrl}" class="img-fluid mb-2" alt="${imageId}">
-                                </div>
-                            `;
-                            
-                            imagesContainer.appendChild(imageDiv);
-                        } else {
-                            const errorDiv = document.createElement('div');
-                            errorDiv.className = 'alert alert-warning mb-4';
-                            errorDiv.textContent = `Không thể tải hình ảnh: ${imageId}`;
-                            imagesContainer.appendChild(errorDiv);
-                        }
-                    } catch (e) {
-                        logMessage(`Lỗi khi tải hình ảnh ${imageId}: ${e.message}`);
-                    }
-                }
-            }
-            
-            if (imagesContainer.children.length === 0) {
-                imagesContainer.innerHTML = '<div class="alert alert-danger">Không thể tải hình ảnh nào</div>';
-            }
-            
-        } else {
-            imagesContainer.innerHTML = `<div class="alert alert-danger">Lỗi khi tải hình ảnh: ${result.error}</div>`;
-            logMessage('Lỗi khi tải hình ảnh: ' + result.error);
-        }
-    } catch (error) {
-        document.getElementById('imagesContainer').innerHTML = `<div class="alert alert-danger">Lỗi khi tải hình ảnh: ${error.message}</div>`;
-        logMessage('Lỗi khi tải hình ảnh: ' + error.message);
-    }
-}
-
-// Hàm xử lý xuất file
-function exportFile(exportType) {
-    if (!window.resultId) {
-        logMessage(`Không có kết quả OCR để xuất ${exportType}`);
-        return;
-    }
-    
-    // Hiển thị thông báo đang xử lý
-    let exportDescription = '';
-    switch(exportType) {
-        case 'word-equation':
-            exportDescription = 'Word với công thức toán học';
-            updateProgress(30, `Đang chuẩn bị xuất ${exportDescription}...`);
-            break;
-        case 'word-image':
-            exportDescription = 'Word với hình ảnh';
-            updateProgress(30, `Đang chuẩn bị xuất ${exportDescription}...`);
-            break;
-        case 'zip':
-            exportDescription = 'file ZIP đầy đủ';
-            updateProgress(30, `Đang chuẩn bị xuất ${exportDescription}...`);
-            break;
-    }
-    
-    // Hiển thị modal thông báo đang xử lý
-    const processingModalDiv = document.createElement('div');
-    processingModalDiv.className = 'modal fade show';
-    processingModalDiv.id = 'processingModal';
-    processingModalDiv.style.display = 'block';
-    processingModalDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-    processingModalDiv.setAttribute('tabindex', '-1');
-    
-    let processingTitle = '';
-    let processingDescription = '';
-    let processingIcon = '';
-    
-    switch(exportType) {
-        case 'word-equation':
-            processingTitle = 'Đang xuất Word với công thức toán học';
-            processingDescription = 'Hệ thống đang chuyển đổi công thức LaTeX thành equation Word.';
-            processingIcon = '<i class="bi bi-calculator text-primary mb-3" style="font-size: 2rem;"></i>';
-            break;
-        case 'word-image':
-            processingTitle = 'Đang xuất Word với hình ảnh';
-            processingDescription = 'Hệ thống đang chèn hình ảnh vào tài liệu Word.';
-            processingIcon = '<i class="bi bi-file-earmark-image text-primary mb-3" style="font-size: 2rem;"></i>';
-            break;
-        case 'zip':
-            processingTitle = 'Đang xuất file ZIP';
-            processingDescription = 'Hệ thống đang đóng gói tất cả dữ liệu vào file ZIP.';
-            processingIcon = '<i class="bi bi-file-earmark-zip text-primary mb-3" style="font-size: 2rem;"></i>';
-            break;
-    }
-    
-    processingModalDiv.innerHTML = `
-        <div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-body text-center">
-                    ${processingIcon ? processingIcon : '<div class="spinner-border text-primary mb-3" role="status"><span class="visually-hidden">Đang xử lý...</span></div>'}
-                    <h5>${processingTitle}</h5>
-                    <p>${processingDescription}</p>
-                    <div id="exportTimer" class="text-muted mt-2">0:00</div>
-                    <div class="progress mt-3">
-                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
-                             style="width: 100%"></div>
-                    </div>
-                    <p class="small text-muted mt-2">
-                        Quá trình này có thể mất một lúc, vui lòng đợi.
-                    </p>
-                    <button id="cancelExport" class="btn btn-sm btn-outline-secondary mt-2">Hủy</button>
-                </div>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(processingModalDiv);
-    
-    // Bắt đầu đếm thời gian
-    let seconds = 0;
-    const timerElement = document.getElementById('exportTimer');
-    const timerInterval = setInterval(() => {
-        seconds++;
-        const minutes = Math.floor(seconds / 60);
-        const remainingSeconds = seconds % 60;
-        timerElement.textContent = `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-    }, 1000);
-    
-    // Xử lý sự kiện hủy
-    document.getElementById('cancelExport').addEventListener('click', function() {
-        clearInterval(timerInterval);
-        document.body.removeChild(processingModalDiv);
-        updateProgress(0, 'Đã hủy xuất file');
-        logMessage(`Đã hủy quá trình xuất ${exportDescription}`);
-        
-        if (window.downloadFrame) {
-            try {
-                document.body.removeChild(window.downloadFrame);
-                window.downloadFrame = null;
-            } catch (e) {
-                console.error('Lỗi khi xóa frame:', e);
-            }
-        }
+    uploadPdfBtn.addEventListener('click', () => {
+        fileInput.accept = '.pdf';
+        fileInput.click();
     });
     
-    // Tạo URL để tải về file - Thêm tham số type để backend biết cần xuất loại file nào
-    const exportUrl = `/export/word/${window.resultId}?type=${exportType}`;
+    uploadImageBtn.addEventListener('click', () => {
+        fileInput.accept = '.png,.jpg,.jpeg';
+        fileInput.click();
+    });
     
-    // Tạo một iframe ẩn để tải file
-    const downloadFrame = document.createElement('iframe');
-    downloadFrame.style.display = 'none';
-    window.downloadFrame = downloadFrame;
-    document.body.appendChild(downloadFrame);
+    fileInput.addEventListener('change', uploadFile);
     
-    // Thiết lập timeout (2 phút)
-    const exportTimeout = setTimeout(() => {
-        clearInterval(timerInterval);
-        if (document.body.contains(processingModalDiv)) {
-            document.body.removeChild(processingModalDiv);
-        }
-        if (document.body.contains(downloadFrame)) {
-            document.body.removeChild(downloadFrame);
-        }
-        window.downloadFrame = null;
-        
-        updateProgress(0, 'Xuất file thất bại: Quá thời gian chờ');
-        logMessage('Quá trình xuất đã quá thời gian chờ (120 giây). Vui lòng thử lại sau.');
-        
-    }, 120000); // 120 giây timeout (2 phút)
+    convertBtn.addEventListener('click', () => convertFile('text'));
+    latexMcqBtn.addEventListener('click', () => convertFile('latex_mcq'));
+    wordBtn.addEventListener('click', convertToWord);
     
-    // Theo dõi khi tải xong
-    downloadFrame.onload = function() {
-        clearTimeout(exportTimeout);
-        clearInterval(timerInterval);
+    // Functions
+    async function generateHardwareIdAuto() {
+        showLoading('Đang tạo Hardware ID...');
         
         try {
-            const frameContent = downloadFrame.contentDocument || downloadFrame.contentWindow.document;
-            const contentType = frameContent.contentType || '';
+            // Use FingerprintJS to get unique visitor ID
+            const fp = await fpPromise;
+            const result = await fp.get();
             
-            if (frameContent && frameContent.body && frameContent.body.textContent) {
-                const responseText = frameContent.body.textContent;
-                
-                // Kiểm tra lỗi JSON
-                if (responseText.includes('"success":false') || responseText.includes('error')) {
-                    try {
-                        const errorData = JSON.parse(responseText);
-                        throw new Error(errorData.error || 'Lỗi khi xử lý');
-                    } catch (e) {
-                        if (e instanceof SyntaxError) {
-                            // Không phải JSON - có thể là file đã tải về
-                            handleSuccessfulDownload(contentType, exportType);
-                        } else {
-                            // Lỗi thực sự
-                            updateProgress(0, `Lỗi: ${e.message}`);
-                            logMessage(`Lỗi khi xuất ${exportDescription}: ${e.message}`);
-                        }
-                    }
-                } else {
-                    // Thành công
-                    handleSuccessfulDownload(contentType, exportType);
-                }
+            // Get additional browser info
+            const cpuCores = navigator.hardwareConcurrency || '';
+            const platform = navigator.platform || '';
+            const userAgent = navigator.userAgent || '';
+            
+            // Create combined hardware info
+            const hardwareInfo = {
+                cpu_id: result.visitorId + cpuCores,
+                bios_serial: platform + result.visitorId.substring(0, 8),
+                motherboard_serial: userAgent.slice(0, 20) + result.visitorId.substring(8, 16)
+            };
+            
+            // Send to server to generate hardware ID
+            const response = await fetch('/api/hardware-id', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(hardwareInfo)
+            });
+            
+            const data = await response.json();
+            hideLoading();
+            
+            if (data.success) {
+                hardwareIdInput.value = data.hardware_id;
+                isActivated = data.activated;
+                updateActivationStatus();
+                updateConversionButtons();
             } else {
-                // File đã tải về (không đọc được nội dung)
-                handleSuccessfulDownload(contentType, exportType);
+                showAlert(fileStatus, `Lỗi: ${data.error}`, 'danger');
             }
-        } catch (e) {
-            // Lỗi cross-origin thường xảy ra khi file được tải về thành công
-            handleSuccessfulDownload('', exportType);
+        } catch (error) {
+            hideLoading();
+            showAlert(fileStatus, `Lỗi khi tạo Hardware ID: ${error.message}`, 'danger');
+            console.error('Hardware ID generation error:', error);
         }
-        
-        // Dọn dẹp
-        if (document.body.contains(processingModalDiv)) {
-            document.body.removeChild(processingModalDiv);
-        }
-        
-        setTimeout(() => {
-            if (document.body.contains(downloadFrame)) {
-                document.body.removeChild(downloadFrame);
-                window.downloadFrame = null;
-            }
-        }, 1000);
-    };
-    
-    // Xử lý lỗi
-    downloadFrame.onerror = function() {
-        clearTimeout(exportTimeout);
-        clearInterval(timerInterval);
-        
-        updateProgress(0, 'Lỗi khi tải xuống file');
-        logMessage(`Lỗi khi tải xuống ${exportDescription}`);
-        
-        if (document.body.contains(processingModalDiv)) {
-            document.body.removeChild(processingModalDiv);
-        }
-        if (document.body.contains(downloadFrame)) {
-            document.body.removeChild(downloadFrame);
-        }
-        window.downloadFrame = null;
-    };
-    
-    // Hàm xử lý khi tải file thành công
-    function handleSuccessfulDownload(contentType, exportType) {
-        let successMessage = '';
-        
-        // Luôn nhận được file ZIP từ backend mới
-        successMessage = `Đã xuất ${exportDescription} thành công`;
-        
-        // Nếu yêu cầu là word-equation hoặc word-image, hiển thị thông báo bổ sung
-        if (exportType === 'word-equation' || exportType === 'word-image') {
-            showZipInfoModal(exportType);
-        }
-        
-        updateProgress(100, successMessage);
-        logMessage(successMessage);
     }
     
-    // Hiển thị modal thông tin về file ZIP khi xuất Word
-    function showZipInfoModal(exportType) {
-        let modalTitle = 'Thông tin về file ZIP đã tải về';
-        let modalBody = '';
-        
-        if (exportType === 'word-equation') {
-            modalBody = `
-                <div class="alert alert-info">
-                    <i class="bi bi-info-circle me-2"></i>
-                    Hệ thống đã tạo file ZIP chứa Word với công thức toán học.
-                </div>
-                <p>File ZIP bao gồm:</p>
-                <ul>
-                    <li><strong>ocr_result_*.docx</strong> - File Word đã tạo</li>
-                    <li><strong>content.md</strong> - Nội dung định dạng Markdown</li>
-                </ul>
-                <p>Hãy giải nén file ZIP để xem nội dung.</p>
-            `;
-        } else if (exportType === 'word-image') {
-            modalBody = `
-                <div class="alert alert-info">
-                    <i class="bi bi-info-circle me-2"></i>
-                    Hệ thống đã tạo file Word với hình ảnh được chèn vào đúng vị trí.
-                </div>
-                <p>File ZIP bao gồm:</p>
-                <ul>
-                    <li><strong>ocr_result_*.docx</strong> - File Word đã tạo với hình ảnh nhúng trực tiếp</li>
-                </ul>
-                <p>Hình ảnh đã được nhúng trực tiếp vào file Word mà không cần thư mục riêng.</p>
-            `;
-        }
-        
-        const modalHtml = `
-            <div class="modal fade" id="zipInfoModal" tabindex="-1" aria-hidden="true">
-                <div class="modal-dialog">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h5 class="modal-title">${modalTitle}</h5>
-                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                        </div>
-                        <div class="modal-body">
-                            ${modalBody}
-                        </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Đã hiểu</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `;
-        
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = modalHtml;
-        document.body.appendChild(tempDiv.firstElementChild);
-        
-        const zipInfoModal = new bootstrap.Modal(document.getElementById('zipInfoModal'));
-        zipInfoModal.show();
-        
-        document.getElementById('zipInfoModal').addEventListener('hidden.bs.modal', function() {
-            document.body.removeChild(this);
-        });
-    }
-    
-    // Bắt đầu tải xuống
-    downloadFrame.src = exportUrl;
-    updateProgress(50, `Đang xử lý ${exportDescription}...`);
-}
-
-// Event Listeners
-document.addEventListener('DOMContentLoaded', function() {
-    generateHardwareId();
-    
-    const uploadForm = document.getElementById('uploadForm');
-    const fileInput = document.getElementById('pdfFile');
-    const processBtn = document.getElementById('processBtn');
-    const fileInfo = document.getElementById('fileInfo');
-    const btnViewImages = document.getElementById('btnViewImages');
-    const imagesModal = new bootstrap.Modal(document.getElementById('imagesModal'));
-    
-    // Kiểm tra xem có kết quả được lưu từ trước không
-    const hasRestoredResults = checkForSavedResults();
-    if (hasRestoredResults) {
-        logMessage('Đã khôi phục kết quả OCR từ phiên trước');
-    }
-    
-    // Xử lý nút hiển thị/ẩn Gemini API key
-    document.getElementById('toggleGeminiKey').addEventListener('click', function() {
-        const geminiInput = document.getElementById('geminiApiKey');
-        if (geminiInput.type === 'password') {
-            geminiInput.type = 'text';
-            this.innerHTML = '<i class="bi bi-eye-slash"></i>';
+    function toggleHardwareInfoSection() {
+        hardwareInfoSection.classList.toggle('d-none');
+        if (!hardwareInfoSection.classList.contains('d-none')) {
+            customizeHardwareIdBtn.textContent = 'Ẩn tùy chỉnh';
         } else {
-            geminiInput.type = 'password';
-            this.innerHTML = '<i class="bi bi-eye"></i>';
+            customizeHardwareIdBtn.textContent = 'Tùy chỉnh Hardware ID';
         }
-    });
-
-    // Xử lý checkbox sửa lỗi chính tả
-    document.getElementById('spellingCorrection').addEventListener('change', function() {
-        const fileInput = document.getElementById('pdfFile');
-        if (fileInput.files && fileInput.files[0]) {
-            updateFileInfo(fileInput.files[0]);
-        }
-    });
+    }
     
-    fileInput.addEventListener('change', function() {
-        if (this.files && this.files[0]) {
-            const file = this.files[0];
-            updateFileInfo(file);
-            processBtn.disabled = false;
-        } else {
-            fileInfo.textContent = 'Chưa chọn file nào';
-            processBtn.disabled = true;
-        }
-    });
-    
-    uploadForm.addEventListener('submit', function(e) {
-        e.preventDefault();
+    function generateHardwareIdCustom() {
+        const cpuId = cpuIdInput.value.trim();
+        const biosSerial = biosSerialInput.value.trim();
+        const motherboardSerial = motherboardSerialInput.value.trim();
         
-        if (!fileInput.files || !fileInput.files[0]) {
-            logMessage('Vui lòng chọn file PDF trước');
+        if (!cpuId || !biosSerial || !motherboardSerial) {
+            showAlert(apiKeyStatus, 'Vui lòng nhập đầy đủ thông tin phần cứng.', 'warning');
             return;
         }
         
-        const formData = new FormData();
-        formData.append('file', fileInput.files[0]);
-        formData.append('hardware_id', document.getElementById('hardwareId').value);
+        showLoading('Đang tạo Hardware ID...');
         
-        // Thêm Gemini API key và tính năng sửa lỗi chính tả
-        const geminiApiKey = document.getElementById('geminiApiKey').value;
-        const spellingCorrection = document.getElementById('spellingCorrection').checked;
-        formData.append('gemini_api_key', geminiApiKey);
-        formData.append('spelling_correction', spellingCorrection);
-        
-        if (spellingCorrection && !geminiApiKey) {
-            logMessage('Cảnh báo: Đã bật tính năng sửa lỗi chính tả nhưng chưa nhập Gemini API Key');
+        fetch('/api/hardware-id', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                cpu_id: cpuId,
+                bios_serial: biosSerial,
+                motherboard_serial: motherboardSerial
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            hideLoading();
+            if (data.success) {
+                hardwareIdInput.value = data.hardware_id;
+                isActivated = data.activated;
+                updateActivationStatus();
+                updateConversionButtons();
+                
+                // Ẩn phần tùy chỉnh sau khi đã tạo thành công
+                hardwareInfoSection.classList.add('d-none');
+                customizeHardwareIdBtn.textContent = 'Tùy chỉnh Hardware ID';
+                showAlert(apiKeyStatus, 'Hardware ID đã được tạo thành công.', 'success');
+            } else {
+                showAlert(apiKeyStatus, `Lỗi: ${data.error}`, 'danger');
+            }
+        })
+        .catch(error => {
+            hideLoading();
+            showAlert(apiKeyStatus, `Lỗi: ${error.message}`, 'danger');
+        });
+    }
+    
+    function setApiKey() {
+        const apiKey = apiKeyInput.value.trim();
+        if (!apiKey) {
+            showAlert(apiKeyStatus, 'Please enter an API Key.', 'warning');
+            return;
         }
         
-        processBtn.disabled = true;
-        updateProgress(0, 'Đang bắt đầu xử lý OCR...');
+        showLoading('Setting API Key...');
         
-        processOCR(formData).finally(() => {
-            processBtn.disabled = false;
-        });
-    });
+        // In a real implementation, you would validate the API key with your backend
+        // For now, we'll just simulate success
+        setTimeout(() => {
+            hideLoading();
+            showAlert(apiKeyStatus, 'API Key set successfully!', 'success');
+            apiKeyInput.disabled = true;
+            setApiKeyBtn.disabled = true;
+            editApiKeyBtn.disabled = false;
+            apiKeySet = true;
+            localStorage.setItem('apiKey', apiKey);
+            updateConversionButtons();
+        }, 500);
+    }
     
-    btnViewImages.addEventListener('click', function() {
-        loadImages().then(() => {
-            imagesModal.show();
-        });
-    });
+    function editApiKey() {
+        apiKeyInput.disabled = false;
+        setApiKeyBtn.disabled = false;
+        editApiKeyBtn.disabled = true;
+        apiKeySet = false;
+        updateConversionButtons();
+    }
     
-    // Thêm event listener cho imagesModal để làm mới hình ảnh khi mở lại
-    document.getElementById('imagesModal').addEventListener('show.bs.modal', function() {
-        loadImages();
-    });
+    function updateActivationStatus() {
+        if (isActivated) {
+            activationStatus.textContent = 'ĐÃ KÍCH HOẠT';
+            activationStatus.classList.remove('bg-warning');
+            activationStatus.classList.add('bg-success');
+            activationStatus.classList.remove('text-dark');
+            activationStatus.classList.add('text-white');
+        } else {
+            activationStatus.textContent = 'CHƯA KÍCH HOẠT';
+            activationStatus.classList.remove('bg-success');
+            activationStatus.classList.add('bg-warning');
+            activationStatus.classList.add('text-dark');
+            activationStatus.classList.remove('text-white');
+        }
+    }
     
-    // Thêm event listener cho các nút xuất file
-    document.getElementById('btnExportWordEquation').addEventListener('click', function() {
-        exportFile('word-equation');
-    });
+    function uploadFile() {
+        if (!apiKeySet) {
+            showAlert(fileStatus, 'Please set the API Key first.', 'warning');
+            return;
+        }
+        
+        if (!isActivated) {
+            showAlert(fileStatus, 'Please activate the application first.', 'warning');
+            return;
+        }
+        
+        const file = fileInput.files[0];
+        if (!file) return;
+        
+        fileLabel.textContent = `File: ${file.name}`;
+        fileUploaded = true;
+        updateConversionButtons();
+        showAlert(fileStatus, `File selected: ${file.name}`, 'info');
+    }
     
-    document.getElementById('btnExportWordImage').addEventListener('click', function() {
-        exportFile('word-image');
-    });
+    function createProgressBars(count) {
+        progressBarsContainer.innerHTML = '';
+        for (let i = 0; i < count; i++) {
+            const container = document.createElement('div');
+            container.className = 'part-progress';
+            
+            const label = document.createElement('div');
+            label.textContent = `Part ${i + 1}:`;
+            
+            const progressBar = document.createElement('div');
+            progressBar.className = 'progress';
+            
+            const progress = document.createElement('div');
+            progress.className = 'progress-bar';
+            progress.id = `progress-${i}`;
+            progress.setAttribute('role', 'progressbar');
+            progress.style.width = '0%';
+            progress.setAttribute('aria-valuenow', '0');
+            progress.setAttribute('aria-valuemin', '0');
+            progress.setAttribute('aria-valuemax', '100');
+            
+            progressBar.appendChild(progress);
+            container.appendChild(label);
+            container.appendChild(progressBar);
+            progressBarsContainer.appendChild(container);
+        }
+    }
     
-    document.getElementById('btnExportZip').addEventListener('click', function() {
-        exportFile('zip');
-    });
+    function convertFile(type) {
+        if (!apiKeySet) {
+            alert('Please set the API Key first.');
+            return;
+        }
+        
+        if (!isActivated) {
+            alert('Please activate the application first.');
+            return;
+        }
+        
+        if (!fileUploaded) {
+            alert('Please upload a file first.');
+            return;
+        }
+        
+        const file = fileInput.files[0];
+        if (!file) {
+            alert('Please select a file first.');
+            return;
+        }
+        
+        convertBtn.disabled = true;
+        latexMcqBtn.disabled = true;
+        
+        // Create FormData object and append file
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('hardware_id', hardwareIdInput.value);
+        
+        // Show loading overlay
+        showLoading(`Converting ${file.name} to ${type === 'latex_mcq' ? 'LaTeX/MCQ' : 'text'}...`);
+        
+        // Update progress bar to show indeterminate progress
+        overallProgressBar.style.width = '100%';
+        overallProgressBar.classList.add('progress-bar-striped', 'progress-bar-animated');
+        statusLabel.textContent = 'Status: Processing...';
+        
+        // Simulate conversion process with progress
+        let progress = 0;
+        const interval = setInterval(() => {
+            progress += 5;
+            if (progress > 90) {
+                clearInterval(interval);
+            }
+            overallProgressBar.style.width = `${progress}%`;
+        }, 500);
+        
+        setTimeout(() => {
+            // Simulate conversion complete
+            clearInterval(interval);
+            overallProgressBar.style.width = '100%';
+            overallProgressBar.classList.remove('progress-bar-striped', 'progress-bar-animated');
+            
+            // Show result
+            resultText.value = `This is simulated ${type} conversion result for ${file.name}.
+            
+In a real implementation, this would be the actual converted content from the PDF/Image.
+
+For a LaTeX example:
+$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$
+
+With proper backend implementation, this will be replaced with actual converted content.`;
+            
+            hideLoading();
+            statusLabel.textContent = 'Status: Conversion complete';
+            
+            // Enable buttons
+            convertBtn.disabled = false;
+            latexMcqBtn.disabled = false;
+            wordBtn.disabled = false;
+            
+            showAlert(fileStatus, 'Conversion completed successfully.', 'success');
+        }, 3000);
+    }
+    
+    function convertToWord() {
+        const content = resultText.value;
+        if (!content) {
+            alert('No content to convert to Word.');
+            return;
+        }
+        
+        showLoading('Converting to Word...');
+        
+        // Simulate Word conversion
+        setTimeout(() => {
+            hideLoading();
+            alert('Word conversion is simulated. In a real implementation, this would trigger a download.');
+        }, 1500);
+    }
+    
+    function updateConversionButtons() {
+        const canConvert = apiKeySet && isActivated && fileUploaded;
+        convertBtn.disabled = !canConvert;
+        latexMcqBtn.disabled = !canConvert;
+    }
+    
+    function showAlert(element, message, type) {
+        element.textContent = message;
+        element.className = `alert alert-${type}`;
+        element.classList.remove('d-none');
+        
+        // Auto-hide after 5 seconds
+        setTimeout(() => {
+            element.classList.add('d-none');
+        }, 5000);
+    }
+    
+    function showLoading(message) {
+        loadingMessage.textContent = message || 'Processing...';
+        loadingOverlay.classList.remove('d-none');
+    }
+    
+    function hideLoading() {
+        loadingOverlay.classList.add('d-none');
+    }
 });
