@@ -2,19 +2,18 @@ import os
 import re
 import time
 import json
-import base64
 import hashlib
 import logging
-import shutil
 import tempfile
 import subprocess
+import concurrent.futures
 from io import BytesIO
 from flask import Flask, render_template, request, jsonify, session, send_file
 from werkzeug.utils import secure_filename
-import concurrent.futures
 import google.generativeai as genai
 from PyPDF2 import PdfReader, PdfWriter
 import requests
+import shutil
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'p_convert_2025_secret_key')
@@ -34,45 +33,6 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 def index():
     """Render the main application page"""
     return render_template('index.html')
-
-@app.route('/api/set-api-key', methods=['POST'])
-def set_api_key():
-    """Set the Google Generative AI API key"""
-    data = request.json
-    api_key = data.get('api_key')
-    
-    if not api_key:
-        return jsonify({'success': False, 'message': 'API key is required'}), 400
-    
-    try:
-        # Configure the Gemini API with the provided key
-        genai.configure(api_key=api_key)
-        
-        # Store the API key in the session for subsequent requests
-        session['api_key'] = api_key
-        
-        # Try to get the model to verify the API key works
-        model_name = get_model_name()
-        
-        return jsonify({'success': True, 'message': 'API key set successfully', 'model': model_name})
-    except Exception as e:
-        app.logger.error(f"Error setting API key: {str(e)}")
-        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
-
-def get_model_name():
-    """Get the model name from GitHub or use default"""
-    try:
-        model_url = "https://raw.githubusercontent.com/thayphuctoan/pconvert/refs/heads/main/p_convert_model_2025"
-        response = requests.get(model_url, timeout=(10, 30))
-        
-        if response.status_code == 200:
-            return response.text.strip()
-        
-        # Fallback model name
-        return "gemini-1.5-pro-latest"
-    except Exception as e:
-        app.logger.error(f"Error getting model name: {str(e)}")
-        return "gemini-1.5-pro-latest"
 
 @app.route('/api/hardware-id', methods=['POST'])
 def get_hardware_id():
@@ -107,6 +67,21 @@ def check_activation(hardware_id):
         app.logger.error(f"Lỗi khi kiểm tra kích hoạt: {str(e)}")
         return False
 
+def get_model_name():
+    """Get the model name from GitHub or use default"""
+    try:
+        model_url = "https://raw.githubusercontent.com/thayphuctoan/pconvert/refs/heads/main/p_convert_model_2025"
+        response = requests.get(model_url, timeout=(10, 30))
+        
+        if response.status_code == 200:
+            return response.text.strip()
+        
+        # Fallback model name
+        return "gemini-1.5-pro-latest"
+    except Exception as e:
+        app.logger.error(f"Error getting model name: {str(e)}")
+        return "gemini-1.5-pro-latest"
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """Handle file upload and OCR processing"""
@@ -118,7 +93,7 @@ def upload_file():
             'error': 'Phần mềm chưa được kích hoạt hoặc Hardware ID không hợp lệ.'
         }), 403
     
-    # Get spelling correction options
+    # Get API key from form data
     gemini_api_key = request.form.get('gemini_api_key', '')
     spelling_correction = request.form.get('spelling_correction') == 'true'
     
@@ -157,42 +132,82 @@ def upload_file():
                     'error': 'Không thể đọc file PDF, vui lòng kiểm tra lại.'
                 }), 400
                 
-            # Process PDF with OCR
-            ocr_result = process_ocr(file_path)
-            
-            # Apply spelling correction if requested
-            if spelling_correction and gemini_api_key:
-                app.logger.info("Đang sửa lỗi chính tả với Gemini API...")
-                original_text = ocr_result["text"]
-                corrected_text = call_gemini_api(original_text, gemini_api_key)
+            # Process PDF with Gemini OCR
+            if not gemini_api_key:
+                return jsonify({'success': False, 'error': 'Vui lòng cung cấp Gemini API key'}), 400
                 
-                if not corrected_text.startswith("Lỗi:"):
-                    app.logger.info("Sửa lỗi chính tả thành công")
-                    ocr_result["text"] = corrected_text
-                else:
-                    app.logger.error(f"Lỗi khi sửa lỗi chính tả: {corrected_text}")
+            try:
+                # Configure Gemini API
+                genai.configure(api_key=gemini_api_key)
+                
+                # Get appropriate model
+                model_name = get_model_name()
+                generation_config = {
+                    "temperature": 0.1,
+                    "top_p": 0.95,
+                    "top_k": 40,
+                    "max_output_tokens": 65536,
+                }
+                model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                
+                # Upload file to Gemini
+                uploaded_file = genai.upload_file(file_path)
+                
+                # Generate OCR prompt
+                prompt = """
+                Hãy nhận diện và gõ lại [CHÍNH XÁC] PDF thành văn bản, tất cả công thức Toán Latex, bọc trong dấu $
+                [TUYỆT ĐỐI] không thêm nội dung khác ngoài nội dung PDF, [CHỈ ĐƯỢC PHÉP] gõ lại nội dung PDF thành văn bản.
+                """
+                
+                # Generate content
+                response = model.generate_content([uploaded_file, prompt])
+                ocr_text = response.text
+                
+                # Apply spelling correction if requested
+                if spelling_correction:
+                    app.logger.info("Đang sửa lỗi chính tả với Gemini API...")
+                    corrected_text = call_gemini_api(ocr_text, gemini_api_key)
+                    
+                    if not corrected_text.startswith("Lỗi:"):
+                        app.logger.info("Sửa lỗi chính tả thành công")
+                        ocr_text = corrected_text
+                    else:
+                        app.logger.error(f"Lỗi khi sửa lỗi chính tả: {corrected_text}")
+                
+                # Process equations and formulas
+                ocr_text = process_equations(ocr_text)
+                
+                # Create OCR result object
+                ocr_result = {
+                    "text": ocr_text,
+                    "images": {}  # Empty for now, as we don't extract images with Gemini
+                }
+                
+                # Create unique ID for this result
+                timestamp = int(time.time())
+                clean_filename = os.path.splitext(filename)[0].replace(" ", "_")
+                result_id = f"result_{clean_filename}_{timestamp}.json"
+                
+                # Save result to a temporary file
+                result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_id)
+                with open(result_path, 'w', encoding='utf-8') as f:
+                    json.dump(ocr_result, f, ensure_ascii=False)
+                
+                return jsonify({
+                    'success': True,
+                    'filename': filename,
+                    'page_count': total_pages,
+                    'text': ocr_result['text'],
+                    'image_count': len(ocr_result.get('images', {})),
+                    'result_id': result_id
+                })
             
-            # Create unique ID for this result
-            timestamp = int(time.time())
-            clean_filename = os.path.splitext(filename)[0].replace(" ", "_")
-            result_id = f"result_{clean_filename}_{timestamp}.json"
-            
-            # Save result to a temporary file
-            result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_id)
-            with open(result_path, 'w', encoding='utf-8') as f:
-                json.dump(ocr_result, f, ensure_ascii=False)
-            
-            return jsonify({
-                'success': True,
-                'filename': filename,
-                'page_count': total_pages,
-                'text': ocr_result['text'],
-                'image_count': len(ocr_result.get('images', {})),
-                'result_id': result_id
-            })
-            
+            except Exception as e:
+                app.logger.error(f"Lỗi khi xử lý với Gemini OCR: {str(e)}")
+                return jsonify({'success': False, 'error': f'Lỗi khi xử lý với Gemini OCR: {str(e)}'}), 500
+                
         except Exception as e:
-            app.logger.error(f"Lỗi khi xử lý OCR: {str(e)}")
+            app.logger.error(f"Lỗi khi xử lý file PDF: {str(e)}")
             return jsonify({'success': False, 'error': str(e)}), 500
         finally:
             # Clean up temporary file
@@ -200,61 +215,6 @@ def upload_file():
                 os.remove(file_path)
     
     return jsonify({'success': False, 'error': 'Loại file không được hỗ trợ, chỉ chấp nhận PDF'}), 400
-
-def process_ocr(file_path):
-    """Process OCR on a PDF file"""
-    # This is a simplified version - in actual implementation, you would use
-    # the OCR service of your choice (e.g., Google Cloud Vision, Azure OCR, etc.)
-    
-    try:
-        app.logger.info(f"Xử lý OCR cho file: {file_path}")
-        
-        # Initialize OCR results
-        ocr_result = {
-            "text": "",
-            "images": {}
-        }
-        
-        # Configure the Gemini API
-        if 'api_key' in session and session['api_key']:
-            genai.configure(api_key=session['api_key'])
-            
-            # Get model
-            model_name = get_model_name()
-            generation_config = {
-                "temperature": 0.1,
-                "top_p": 0.95,
-                "top_k": 40,
-                "max_output_tokens": 65536,
-            }
-            model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
-            
-            # Execute OCR with Gemini
-            uploaded_file = genai.upload_file(file_path)
-            prompt = """
-            Nhận diện văn bản trong file PDF này, bao gồm cả công thức toán học. 
-            Hãy cấu trúc công thức toán học trong dấu $ (inline) hoặc $$ (block).
-            Giữ nguyên định dạng và bố cục càng nhiều càng tốt.
-            Đối với các hình ảnh, hãy chỉ ra vị trí của chúng bằng [HÌNH].
-            """
-            
-            response = model.generate_content([uploaded_file, prompt])
-            ocr_result["text"] = response.text
-            
-            # For demo purposes, add a sample image
-            image_id = "sample_image_1"
-            # This would be base64 data in a real implementation
-            ocr_result["images"][image_id] = "dummy_base64_data"
-            
-            # Replace [HÌNH] with image references
-            ocr_result["text"] = ocr_result["text"].replace("[HÌNH]", f"[HÌNH: {image_id}]")
-            
-            return ocr_result
-        else:
-            return {"text": "API key chưa được cấu hình", "images": {}}
-    except Exception as e:
-        app.logger.error(f"Lỗi trong quá trình OCR: {str(e)}")
-        raise
 
 def call_gemini_api(original_text, gemini_key):
     """
@@ -305,6 +265,36 @@ def call_gemini_api(original_text, gemini_key):
     except Exception as e:
         return f"Lỗi: Gọi Gemini API thất bại: {str(e)}"
 
+def process_equations(text):
+    """Xử lý và chuẩn hóa công thức toán học trong văn bản"""
+    processed_text = text
+    
+    # Phát hiện và chuẩn hóa các công thức LaTeX inline
+    inline_patterns = [
+        (r'\$([^$]+?)\$', r'$\1$'),              # $công_thức$
+        (r'\\[(]([^)]+?)\\[)]', r'$\1$'),        # \(công_thức\)
+        (r'`\$([^$]+?)\$`', r'$\1$'),            # `$công_thức$`
+        (r'`\\[(]([^)]+?)\\[)]`', r'$\1$')       # `\(công_thức\)`
+    ]
+    
+    for pattern, replacement in inline_patterns:
+        processed_text = re.sub(pattern, replacement, processed_text)
+    
+    # Phát hiện và chuẩn hóa các công thức LaTeX block
+    simple_block_patterns = [
+        (r'\$\$([^$]+?)\$\$', r'$$\1$$'),        # $$công_thức$$
+        (r'\\[\[]([^]]+?)\\[\]]', r'$$\1$$')     # \[công_thức\]
+    ]
+    
+    for pattern, replacement in simple_block_patterns:
+        processed_text = re.sub(pattern, replacement, processed_text)
+    
+    # Xử lý các mẫu cần flags đặc biệt
+    processed_text = re.sub(r'```math\n(.*?)\n```', r'$$\1$$', processed_text, flags=re.DOTALL)  # ```math ... ```
+    processed_text = re.sub(r'```latex\n(.*?)\n```', r'$$\1$$', processed_text, flags=re.DOTALL)  # ```latex ... ```
+    
+    return processed_text
+
 @app.route('/results/<result_id>', methods=['GET'])
 def get_result(result_id):
     """Get saved OCR results"""
@@ -349,14 +339,9 @@ def get_image(result_id, image_id):
             app.logger.error(f"Không tìm thấy hình ảnh {image_id} trong kết quả")
             return jsonify({'success': False, 'error': 'Không tìm thấy hình ảnh'}), 404
         
-        # Get image data
-        img_data = result['images'][image_id]
-        if "," in img_data:
-            img_data = img_data.split(",", 1)[1]
-        
-        # For demonstration, we'll return a placeholder image
+        # Create a placeholder image since we don't have actual images from Gemini
         placeholder_img = BytesIO()
-        placeholder_img.write(base64.b64decode(img_data))
+        placeholder_img.write(b"Placeholder image")  # Just a placeholder
         placeholder_img.seek(0)
         
         return send_file(placeholder_img, mimetype='image/jpeg')
@@ -389,20 +374,6 @@ def export_to_word(result_id):
         
         # Process text for export
         markdown_content = result['text']
-        
-        # Process images if needed
-        if export_type in ['word-image', 'zip']:
-            images_dir = os.path.join(export_path, "images")
-            os.makedirs(images_dir, exist_ok=True)
-            
-            # Save images to files
-            for img_id, base64_data in result.get('images', {}).items():
-                if "," in base64_data:
-                    base64_data = base64_data.split(",", 1)[1]
-                
-                img_path = os.path.join(images_dir, f"{img_id}.jpg")
-                with open(img_path, 'wb') as img_file:
-                    img_file.write(base64.b64decode(base64_data))
         
         # Save markdown content
         markdown_path = os.path.join(export_path, "content.md")
