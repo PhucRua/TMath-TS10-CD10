@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P_Convert_2025 - PDF/Image to Text Converter</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1 class="my-4 text-center">P_Convert_2025</h1>
+        <p class="text-center mb-4">Chuyển PDF/Image sang Text</p>
+
+        <!-- API Key Section -->
+        <div class="card mb-4">
+            <div class="card-header">API Key Configuration</div>
+            <div class="card-body">
+                <div class="input-group mb-3">
+                    <input type="password" id="apiKeyInput" class="form-control" placeholder="Enter Google Generative AI API Key">
+                    <button class="btn btn-primary" id="setApiKeyBtn">Set API Key</button>
+                    <button class="btn btn-secondary" id="editApiKeyBtn" disabled>Edit API Key</button>
+                </div>
+                <div id="apiKeyStatus" class="alert alert-info d-none"></div>
+            </div>
+        </div>
+
+        <!-- Hardware ID Section -->
+        <div class="card mb-4">
+            <div class="card-header">Hardware ID and Activation</div>
+            <div class="card-body">
+                <div class="row mb-3">
+                    <div class="col-md-9">
+                        <div class="input-group">
+                            <span class="input-group-text">Hardware ID:</span>
+                            <input type="text" id="hardwareIdInput" class="form-control" readonly>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <span class="badge bg-warning text-dark" id="activationStatus">CHƯA KÍCH HOẠT</span>
+                    </div>
+                </div>
+                <!-- Hardware Info Collection -->
+                <div class="hardware-info-section">
+                    <p>To generate your Hardware ID, please provide the following information:</p>
+                    <div class="mb-2">
+                        <input type="text" id="cpuIdInput" class="form-control" placeholder="CPU ID">
+                    </div>
+                    <div class="mb-2">
+                        <input type="text" id="biosSerialInput" class="form-control" placeholder="BIOS Serial">
+                    </div>
+                    <div class="mb-2">
+                        <input type="text" id="motherboardSerialInput" class="form-control" placeholder="Motherboard Serial">
+                    </div>
+                    <button class="btn btn-primary" id="generateHardwareIdBtn">Generate Hardware ID</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- File Upload Section -->
+        <div class="card mb-4">
+            <div class="card-header">File Upload</div>
+            <div class="card-body">
+                <div class="d-flex mb-3">
+                    <button class="btn btn-primary me-2" id="uploadPdfBtn">Upload PDF</button>
+                    <button class="btn btn-primary me-2" id="uploadImageBtn">Upload Image</button>
+                    <span class="form-control" id="fileLabel">No file selected</span>
+                </div>
+                <input type="file" id="fileInput" class="d-none">
+                <div id="fileStatus" class="alert alert-info d-none"></div>
+            </div>
+        </div>
+
+        <!-- Conversion Buttons -->
+        <div class="mb-4">
+            <button class="btn btn-success col-12 mb-2" id="convertBtn" disabled>Convert PDF/Image to Text</button>
+            <button class="btn btn-info col-12" id="latexMcqBtn" disabled>Convert to LaTeX ex_test</button>
+        </div>
+
+        <!-- Overall Progress -->
+        <div class="mb-4">
+            <h5>Overall Progress:</h5>
+            <div class="progress mb-2">
+                <div id="overallProgressBar" class="progress-bar" role="progressbar" style="width: 0%"></div>
+            </div>
+            <p id="statusLabel">Status: Idle</p>
+        </div>
+
+        <!-- Individual Parts Progress -->
+        <div class="mb-4" id="partsProgressContainer">
+            <h5>Parts Progress:</h5>
+            <div id="progressBarsContainer"></div>
+        </div>
+
+        <!-- Results -->
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Results:</span>
+                <button class="btn btn-primary btn-sm" id="wordBtn" disabled>Convert to Word</button>
+            </div>
+            <div class="card-body">
+                <textarea id="resultText" class="form-control" rows="10" readonly></textarea>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay d-none">
+        <div class="spinner-border text-light" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+        <p id="loadingMessage" class="text-light mt-2">Processing...</p>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
