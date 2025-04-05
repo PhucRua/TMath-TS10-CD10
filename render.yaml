@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: p-convert-2025
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+    autoDeploy: true
+    plan: starter
+    healthCheckPath: /
