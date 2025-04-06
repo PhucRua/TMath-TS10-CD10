@@ -1,5 +1,6 @@
 import os
 import re
+import gc
 import time
 import json
 import hashlib
@@ -18,13 +19,13 @@ import shutil
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'p_convert_2025_secret_key')
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max upload size
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
 # Thread pool for concurrent processing
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)  # Reduced workers to save memory
 
 # Create upload folder if it doesn't exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -80,7 +81,7 @@ def check_activation(hardware_id):
     """Kiểm tra xem hardware ID có được kích hoạt không"""
     try:
         url = "https://raw.githubusercontent.com/thayphuctoan/pconvert/refs/heads/main/convert-special-1"
-        response = requests.get(url, timeout=(30, 180))
+        response = requests.get(url, timeout=(10, 30))
         
         if response.status_code == 200:
             valid_ids = response.text.strip().split('\n')
@@ -95,104 +96,147 @@ def get_model_name():
     """Get the model name from GitHub or use default"""
     try:
         model_url = "https://raw.githubusercontent.com/thayphuctoan/pconvert/refs/heads/main/p_convert_model_2025"
-        response = requests.get(model_url, timeout=(30, 180))
+        response = requests.get(model_url, timeout=(10, 30))
         
         if response.status_code == 200:
             return response.text.strip()
         
         # Fallback model name
-        return "gemini-2.5-pro-preview-03-25"
+        return "gemini-1.5-pro-latest"
     except Exception as e:
         app.logger.error(f"Error getting model name: {str(e)}")
-        return "gemini-2.5-pro-preview-03-25"
+        return "gemini-1.5-pro-latest"
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """Handle file upload and processing"""
-    # Check for hardware ID and activation
-    hardware_id = request.form.get('hardware_id')
-    if not hardware_id or not check_activation(hardware_id):
-        return jsonify({
-            'success': False, 
-            'error': 'Phần mềm chưa được kích hoạt hoặc Hardware ID không hợp lệ.'
-        }), 403
-    
-    # Check if API key is provided
-    api_key = request.form.get('api_key')
-    if not api_key:
-        return jsonify({'success': False, 'error': 'API key is required'}), 400
-    
-    # Check if file was uploaded
-    if 'file' not in request.files:
-        return jsonify({'success': False, 'error': 'No file part'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'success': False, 'error': 'No selected file'}), 400
-    
-    if file and (file.filename.lower().endswith('.pdf') or file.filename.lower().endswith(('.jpg', '.jpeg', '.png'))):
-        # Save the file temporarily
-        filename = secure_filename(file.filename)
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(file_path)
+    try:
+        # Check for hardware ID and activation
+        hardware_id = request.form.get('hardware_id')
+        if not hardware_id or not check_activation(hardware_id):
+            return jsonify({
+                'success': False, 
+                'error': 'Phần mềm chưa được kích hoạt hoặc Hardware ID không hợp lệ.'
+            }), 403
         
-        # Handle PDF file
-        if file.filename.lower().endswith('.pdf'):
-            # Check PDF size
-            pdf = PdfReader(file_path)
-            total_pages = len(pdf.pages)
+        # Check if API key is provided
+        api_key = request.form.get('api_key')
+        if not api_key:
+            return jsonify({'success': False, 'error': 'API key is required'}), 400
+        
+        # Check if file was uploaded
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file part'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'error': 'No selected file'}), 400
+        
+        if file and (file.filename.lower().endswith('.pdf') or file.filename.lower().endswith(('.jpg', '.jpeg', '.png'))):
+            # Save the file temporarily
+            filename = secure_filename(file.filename)
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             
-            if total_pages > 20:
-                # Split PDF and process in parts
-                split_files = split_pdf(file_path, pdf, total_pages)
-                
-                # Record the split files in session for later use
-                session['split_files'] = split_files
-                session['api_key'] = api_key
-                
-                # Return split info
-                return jsonify({
-                    'success': True, 
-                    'message': f'PDF split into {len(split_files)} parts',
-                    'filename': filename,
-                    'is_pdf': True,
-                    'single_file': False,
-                    'total_parts': len(split_files),
-                    'total_pages': total_pages
-                })
-            else:
+            # Stream to file instead of loading into memory
+            file.save(file_path)
+            
+            app.logger.info(f"File saved: {file_path}, Size: {os.path.getsize(file_path)} bytes")
+            
+            # Handle PDF file
+            if file.filename.lower().endswith('.pdf'):
+                # Open the PDF with minimal memory usage
                 try:
-                    # Configure the Gemini API
-                    genai.configure(api_key=api_key)
+                    # Use context manager to ensure file is closed properly
+                    with open(file_path, 'rb') as f:
+                        pdf = PdfReader(f)
+                        total_pages = len(pdf.pages)
+                        app.logger.info(f"PDF has {total_pages} pages")
+
+                    # Force garbage collection to free memory
+                    gc.collect()
                     
-                    # Upload file to Gemini
-                    uploaded_file = genai.upload_file(file_path)
+                    # Set a smaller chunk size to reduce memory usage
+                    chunk_size = 5  # Reduced from 20 to 5 pages per chunk
                     
-                    # Get the appropriate prompt based on conversion type
-                    prompt = get_prompt('text')
-                    
-                    # Get appropriate model
-                    model_name = get_model_name()
-                    generation_config = {
-                        "temperature": 0.1,
-                        "top_p": 0.95,
-                        "top_k": 40,
-                        "max_output_tokens": 65536,
-                    }
-                    model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
-                    
-                    # Generate content
-                    response = model.generate_content([uploaded_file, prompt])
-                    result = process_formulas(response.text)
+                    if total_pages > chunk_size:
+                        # Split PDF and process in parts
+                        split_files = split_pdf(file_path, total_pages, chunk_size)
+                        
+                        # Store file paths and API key
+                        # Store minimal data in session to save memory
+                        job_id = str(int(time.time()))
+                        job_file = os.path.join(app.config['UPLOAD_FOLDER'], f"job_{job_id}.json")
+                        with open(job_file, 'w') as f:
+                            json.dump({
+                                'split_files': split_files,
+                                'api_key': api_key
+                            }, f)
+                        
+                        return jsonify({
+                            'success': True, 
+                            'message': f'PDF split into {len(split_files)} parts',
+                            'filename': filename,
+                            'is_pdf': True,
+                            'single_file': False,
+                            'total_parts': len(split_files),
+                            'total_pages': total_pages,
+                            'job_id': job_id
+                        })
+                    else:
+                        try:
+                            # Process small PDFs immediately
+                            app.logger.info("Processing small PDF")
+                            result = process_file_with_gemini(file_path, api_key, 'text')
+                            
+                            # Create unique ID for this result
+                            timestamp = int(time.time())
+                            result_id = f"result_{os.path.splitext(filename)[0]}_{timestamp}.txt"
+                            
+                            # Save result to file
+                            result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_id)
+                            with open(result_path, 'w', encoding='utf-8') as f:
+                                f.write(result)
+                            
+                            # Clean up
+                            if os.path.exists(file_path):
+                                os.remove(file_path)
+                            
+                            return jsonify({
+                                'success': True,
+                                'message': 'Conversion completed successfully',
+                                'result': result,
+                                'result_id': result_id
+                            })
+                        except Exception as e:
+                            app.logger.error(f"Error processing PDF: {str(e)}")
+                            # Clean up
+                            if os.path.exists(file_path):
+                                os.remove(file_path)
+                            return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+                except Exception as pdf_error:
+                    app.logger.error(f"Error reading PDF: {str(pdf_error)}")
+                    # Clean up
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    return jsonify({'success': False, 'error': f'Error reading PDF: {str(pdf_error)}'}), 500
+            else:
+                # Handle image file
+                try:
+                    # Process image immediately
+                    result = process_file_with_gemini(file_path, api_key, 'text')
                     
                     # Create unique ID for this result
-                    timestamp = int(time.time())
+                    timestamp = int(time.time()))
                     result_id = f"result_{os.path.splitext(filename)[0]}_{timestamp}.txt"
                     
                     # Save result to file
                     result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_id)
                     with open(result_path, 'w', encoding='utf-8') as f:
                         f.write(result)
+                    
+                    # Clean up
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
                     
                     return jsonify({
                         'success': True,
@@ -201,78 +245,101 @@ def upload_file():
                         'result_id': result_id
                     })
                 except Exception as e:
-                    app.logger.error(f"Error during conversion: {str(e)}")
+                    app.logger.error(f"Error processing image: {str(e)}")
+                    # Clean up
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
                     return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
         else:
-            # Handle image file
-            try:
-                # Configure the Gemini API
-                genai.configure(api_key=api_key)
-                
-                # Upload file to Gemini
-                uploaded_file = genai.upload_file(file_path)
-                
-                # Get the appropriate prompt
-                prompt = get_prompt('text')
-                
-                # Get appropriate model
-                model_name = get_model_name()
-                generation_config = {
-                    "temperature": 0.1,
-                    "top_p": 0.95,
-                    "top_k": 40,
-                    "max_output_tokens": 65536,
-                }
-                model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
-                
-                # Generate content
-                response = model.generate_content([uploaded_file, prompt])
-                result = process_formulas(response.text)
-                
-                # Create unique ID for this result
-                timestamp = int(time.time())
-                result_id = f"result_{os.path.splitext(filename)[0]}_{timestamp}.txt"
-                
-                # Save result to file
-                result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_id)
-                with open(result_path, 'w', encoding='utf-8') as f:
-                    f.write(result)
-                
-                return jsonify({
-                    'success': True,
-                    'message': 'Conversion completed successfully',
-                    'result': result,
-                    'result_id': result_id
-                })
-            except Exception as e:
-                app.logger.error(f"Error during conversion: {str(e)}")
-                return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
-    else:
-        return jsonify({'success': False, 'error': 'File type not supported'}), 400
+            return jsonify({'success': False, 'error': 'File type not supported'}), 400
+    except Exception as e:
+        app.logger.error(f"Unexpected error in upload_file: {str(e)}")
+        return jsonify({'success': False, 'error': f'Unexpected error: {str(e)}'}), 500
 
-def split_pdf(file_path, pdf, total_pages):
-    """Split a PDF into multiple smaller PDFs"""
-    chunk_size = 20
+def process_file_with_gemini(file_path, api_key, conversion_type):
+    """Process a file with Gemini API using minimal memory"""
+    try:
+        # Configure the Gemini API
+        genai.configure(api_key=api_key)
+        
+        # Get the appropriate prompt
+        prompt = get_prompt(conversion_type)
+        
+        # Get appropriate model
+        model_name = get_model_name()
+        generation_config = {
+            "temperature": 0.1,
+            "top_p": 0.95,
+            "top_k": 40,
+            "max_output_tokens": 32768,  # Reduced to save memory
+        }
+        
+        # Create model
+        model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+        
+        # Upload and process file in a controlled way
+        with open(file_path, 'rb') as f:
+            uploaded_file = genai.upload_file(path=file_path, display_name=os.path.basename(file_path))
+            
+            # Generate content
+            response = model.generate_content([uploaded_file, prompt])
+            result = process_formulas(response.text)
+            
+            # Clear references to large objects
+            del response
+            del uploaded_file
+            gc.collect()
+            
+            return result
+    except Exception as e:
+        app.logger.error(f"Error in process_file_with_gemini: {str(e)}")
+        raise
+
+def split_pdf(file_path, total_pages, chunk_size=5):
+    """Split a PDF into multiple smaller PDFs with minimal memory usage"""
     num_chunks = (total_pages + chunk_size - 1) // chunk_size
+    app.logger.info(f"Splitting PDF into {num_chunks} chunks of {chunk_size} pages")
     
     base_name = os.path.splitext(file_path)[0]
     split_files = []
     
-    for i in range(num_chunks):
-        start_page = i * chunk_size
-        end_page = min((i + 1) * chunk_size, total_pages)
+    try:
+        for i in range(num_chunks):
+            start_page = i * chunk_size
+            end_page = min((i + 1) * chunk_size, total_pages)
+            
+            # Create a new PDF with just the pages in this chunk
+            output = PdfWriter()
+            
+            # Use context manager to ensure resources are released
+            with open(file_path, 'rb') as input_file:
+                pdf = PdfReader(input_file)
+                
+                # Only load the pages we need
+                for page_num in range(start_page, end_page):
+                    output.add_page(pdf.pages[page_num])
+                
+                # Write the output file
+                output_filename = f"{base_name}_part{i+1}.pdf"
+                with open(output_filename, "wb") as output_stream:
+                    output.write(output_stream)
+                
+                split_files.append(output_filename)
+            
+            # Force garbage collection after each chunk
+            gc.collect()
+            
+        # Clean up the original file to save space
+        os.remove(file_path)
         
-        output = PdfWriter()
-        for page in range(start_page, end_page):
-            output.add_page(pdf.pages[page])
-        
-        output_filename = f"{base_name}_part{i+1}.pdf"
-        with open(output_filename, "wb") as output_stream:
-            output.write(output_stream)
-        
-        split_files.append(output_filename)
-    
-    return split_files
+        return split_files
+    except Exception as e:
+        app.logger.error(f"Error splitting PDF: {str(e)}")
+        # Clean up partial files on error
+        for file in split_files:
+            if os.path.exists(file):
+                os.remove(file)
+        raise
 
 @app.route('/api/convert', methods=['POST'])
 def convert_file():
@@ -280,127 +347,221 @@ def convert_file():
     data = request.json
     conversion_type = data.get('type', 'text')  # 'text' or 'latex_mcq'
     api_key = data.get('api_key')
+    job_id = data.get('job_id')
     
     if not api_key:
         return jsonify({'success': False, 'message': 'API key is required'}), 400
     
-    # Check if we have split files or a single file
-    if 'split_files' in session and session['split_files']:
-        # Handle split files conversion
-        # Start async processing
+    if not job_id:
+        return jsonify({'success': False, 'message': 'Job ID is required'}), 400
+    
+    # Load job data from file instead of session
+    job_file = os.path.join(app.config['UPLOAD_FOLDER'], f"job_{job_id}.json")
+    
+    if not os.path.exists(job_file):
+        return jsonify({'success': False, 'message': 'Job not found'}), 404
+    
+    try:
+        with open(job_file, 'r') as f:
+            job_data = json.load(f)
+            
+        split_files = job_data.get('split_files', [])
+        
+        if not split_files:
+            return jsonify({'success': False, 'message': 'No files to process'}), 400
+        
+        # Start async processing in a background thread to avoid timeout
         future = executor.submit(
             process_split_files, 
-            session['split_files'], 
+            split_files, 
             api_key,
             get_prompt(conversion_type), 
-            conversion_type
+            conversion_type,
+            job_id
         )
         
-        # Store the future in session to check status later
-        conversion_id = str(id(future))
-        session['conversion_future'] = conversion_id
-        
+        # Store the job ID and return it for status checking
         return jsonify({
             'success': True,
             'message': 'Conversion started',
-            'conversion_id': conversion_id,
-            'total_parts': len(session['split_files'])
+            'job_id': job_id,
+            'total_parts': len(split_files)
         })
-    else:
-        return jsonify({'success': False, 'message': 'No file to convert'}), 400
+    except Exception as e:
+        app.logger.error(f"Error starting conversion: {str(e)}")
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
-def process_split_files(split_files, api_key, prompt, conversion_type):
-    """Process multiple PDF parts and combine the results"""
+def process_split_files(split_files, api_key, prompt, conversion_type, job_id):
+    """Process multiple PDF parts and combine the results with memory optimization"""
     results = {}
+    status_file = os.path.join(app.config['UPLOAD_FOLDER'], f"job_{job_id}_status.json")
     
-    # Configure the Gemini API
-    genai.configure(api_key=api_key)
+    # Initialize status file
+    with open(status_file, 'w') as f:
+        json.dump({
+            'status': 'in_progress',
+            'completed': 0,
+            'total': len(split_files)
+        }, f)
     
-    # Get appropriate model
-    model_name = get_model_name()
-    generation_config = {
-        "temperature": 0.1,
-        "top_p": 0.95,
-        "top_k": 40,
-        "max_output_tokens": 65536,
-    }
-    model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
-    
-    # Process each file sequentially
-    for i, file_path in enumerate(split_files):
-        try:
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    uploaded_file = genai.upload_file(file_path)
-                    response = model.generate_content([uploaded_file, prompt])
-                    results[i] = response.text
-                    break
-                except Exception as e:
-                    if "429" in str(e) and attempt < max_retries - 1:
-                        # Rate limit error, wait and retry
-                        time.sleep(60)  # Wait 60 seconds before retry
-                    else:
-                        raise e
-        except Exception as e:
-            results[i] = f"Error processing part {i+1}: {str(e)}"
-    
-    # Combine results
-    combined_text = "\n\n--- End of Part ---\n\n".join([results[i] for i in sorted(results.keys())])
-    
-    # Process formulas if needed
-    combined_text = process_formulas(combined_text)
-    
-    # Clean up temporary files
-    for file_path in split_files:
-        try:
-            os.remove(file_path)
-        except:
-            pass
-    
-    return combined_text
+    try:
+        # Configure the Gemini API
+        genai.configure(api_key=api_key)
+        
+        # Get appropriate model
+        model_name = get_model_name()
+        generation_config = {
+            "temperature": 0.1,
+            "top_p": 0.95,
+            "top_k": 40,
+            "max_output_tokens": 32768,  # Reduced to save memory
+        }
+        
+        # Process each file sequentially
+        for i, file_path in enumerate(split_files):
+            try:
+                app.logger.info(f"Processing part {i+1}/{len(split_files)}: {file_path}")
+                
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        # Process each file individually to control memory usage
+                        model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                        
+                        # Upload and process file
+                        with open(file_path, 'rb') as f:
+                            uploaded_file = genai.upload_file(path=file_path, display_name=os.path.basename(file_path))
+                            response = model.generate_content([uploaded_file, prompt])
+                            results[i] = response.text
+                            
+                            # Clear references to large objects
+                            del response
+                            del uploaded_file
+                            gc.collect()
+                            
+                            break
+                    except Exception as e:
+                        if "429" in str(e) and attempt < max_retries - 1:
+                            # Rate limit error, wait and retry
+                            app.logger.warning(f"Rate limit hit, waiting before retry: {str(e)}")
+                            time.sleep(60)  # Wait 60 seconds before retry
+                        else:
+                            raise e
+                
+                # Clean up this file immediately to save space
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                
+                # Update status file
+                with open(status_file, 'r') as f:
+                    status = json.load(f)
+                
+                status['completed'] = i + 1
+                
+                with open(status_file, 'w') as f:
+                    json.dump(status, f)
+                
+                # Force garbage collection after each file
+                gc.collect()
+                
+            except Exception as e:
+                app.logger.error(f"Error processing part {i+1}: {str(e)}")
+                results[i] = f"Error processing part {i+1}: {str(e)}"
+                
+                # Clean up this file if it exists
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+        
+        # Combine results
+        combined_text = "\n\n--- End of Part ---\n\n".join([results.get(i, f"Error processing part {i+1}") for i in range(len(split_files))])
+        
+        # Process formulas
+        combined_text = process_formulas(combined_text)
+        
+        # Save the final result to a file
+        timestamp = int(time.time())
+        result_path = os.path.join(app.config['UPLOAD_FOLDER'], f"result_{job_id}_{timestamp}.txt")
+        
+        with open(result_path, 'w', encoding='utf-8') as f:
+            f.write(combined_text)
+        
+        # Update status to completed
+        with open(status_file, 'w') as f:
+            json.dump({
+                'status': 'completed',
+                'completed': len(split_files),
+                'total': len(split_files),
+                'result_path': result_path
+            }, f)
+        
+        return combined_text
+    except Exception as e:
+        app.logger.error(f"Error in process_split_files: {str(e)}")
+        
+        # Update status to error
+        with open(status_file, 'w') as f:
+            json.dump({
+                'status': 'error',
+                'error': str(e)
+            }, f)
+        
+        # Clean up any remaining files
+        for file_path in split_files:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        
+        raise
 
 @app.route('/api/conversion-status', methods=['POST'])
 def check_conversion_status():
     """Check the status of a conversion job"""
     data = request.json
-    conversion_id = data.get('conversion_id')
+    job_id = data.get('job_id')
     
-    if not conversion_id:
-        return jsonify({'success': False, 'message': 'Conversion ID required'}), 400
+    if not job_id:
+        return jsonify({'success': False, 'message': 'Job ID required'}), 400
+    
+    status_file = os.path.join(app.config['UPLOAD_FOLDER'], f"job_{job_id}_status.json")
+    
+    if not os.path.exists(status_file):
+        return jsonify({
+            'success': False, 
+            'message': 'Job not found or status not available'
+        }), 404
     
     try:
-        # Iterate through all futures to find the matching one
-        for future in concurrent.futures._futures.futures_instances:
-            if str(id(future)) == conversion_id:
-                if future.done():
-                    result = future.result()
-                    
-                    # Create unique ID for this result
-                    timestamp = int(time.time())
-                    result_id = f"result_combined_{timestamp}.txt"
-                    
-                    # Save result to file
-                    result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_id)
-                    with open(result_path, 'w', encoding='utf-8') as f:
-                        f.write(result)
-                    
-                    return jsonify({
-                        'success': True,
-                        'status': 'completed',
-                        'result': result,
-                        'result_id': result_id
-                    })
-                else:
-                    return jsonify({
-                        'success': True,
-                        'status': 'in_progress'
-                    })
+        with open(status_file, 'r') as f:
+            status = json.load(f)
         
-        return jsonify({
-            'success': False,
-            'message': 'Conversion not found or expired'
-        }), 404
+        if status.get('status') == 'completed':
+            # Get the result text
+            result_path = status.get('result_path')
+            result_text = ''
+            
+            if os.path.exists(result_path):
+                with open(result_path, 'r', encoding='utf-8') as f:
+                    result_text = f.read()
+            
+            return jsonify({
+                'success': True,
+                'status': 'completed',
+                'result': result_text,
+                'completed': status.get('completed', 0),
+                'total': status.get('total', 0)
+            })
+        elif status.get('status') == 'error':
+            return jsonify({
+                'success': False,
+                'status': 'error',
+                'message': status.get('error', 'Unknown error')
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'status': 'in_progress',
+                'completed': status.get('completed', 0),
+                'total': status.get('total', 0)
+            })
     except Exception as e:
         app.logger.error(f"Error checking conversion status: {str(e)}")
         return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
@@ -415,7 +576,7 @@ def convert_to_word():
         return jsonify({'success': False, 'message': 'No content provided'}), 400
     
     try:
-        # Create temporary files
+        # Create temporary files with context managers to ensure cleanup
         with tempfile.NamedTemporaryFile(suffix='.md', delete=False) as md_file:
             md_path = md_file.name
             content = content.replace('\n', '\n\n')
@@ -424,7 +585,7 @@ def convert_to_word():
         with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as docx_file:
             docx_path = docx_file.name
         
-        # Run pandoc
+        # Run pandoc with minimal options
         pandoc_command = [
             "pandoc",
             md_path,
@@ -434,16 +595,17 @@ def convert_to_word():
             "--mathml"
         ]
         
-        subprocess.run(pandoc_command, check=True)
+        subprocess.run(pandoc_command, check=True, timeout=60)  # Add timeout to prevent hanging
         
         # Read the docx file and return it
         with open(docx_path, 'rb') as f:
             docx_data = f.read()
         
-        # Clean up temporary files
+        # Clean up temporary files immediately
         os.unlink(md_path)
         os.unlink(docx_path)
         
+        # Return the file as an attachment
         return send_file(
             BytesIO(docx_data),
             mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -452,6 +614,16 @@ def convert_to_word():
         )
     except Exception as e:
         app.logger.error(f"Error converting to Word: {str(e)}")
+        
+        # Clean up temp files if they exist
+        try:
+            if 'md_path' in locals() and os.path.exists(md_path):
+                os.unlink(md_path)
+            if 'docx_path' in locals() and os.path.exists(docx_path):
+                os.unlink(docx_path)
+        except:
+            pass
+            
         return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
 def get_prompt(conversion_type):
@@ -520,8 +692,8 @@ def process_formulas(text):
         content = content.replace('*', '')
         return f'${content}$'
 
-    text = re.sub(r'\$(.+?)\$', process_math_content, text, flags=re.DOTALL)
-    return text
+    processed_text = re.sub(r'\$(.+?)\$', process_math_content, text, flags=re.DOTALL)
+    return processed_text
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
