@@ -34,7 +34,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const loadingMessage = document.getElementById('loadingMessage');
     
     // State variables
-    let conversionId = null;
+    let jobId = null;
     let pollInterval = null;
     let isActivated = false;
     let apiKeySet = false;
@@ -343,7 +343,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     // Create progress bars for parts
                     partsProgressContainer.style.display = 'block';
-                    createProgressBars(data.total_parts);
+                    totalParts = data.total_parts;
+                    createProgressBars(totalParts);
+                    
+                    // Store job ID for polling
+                    jobId = data.job_id;
                     
                     // Start conversion with API key
                     return fetch('/api/convert', {
@@ -351,7 +355,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ 
                             type: type,
-                            api_key: apiKeyInput.value
+                            api_key: apiKeyInput.value,
+                            job_id: jobId
                         })
                     });
                 } else {
@@ -384,7 +389,7 @@ document.addEventListener('DOMContentLoaded', function() {
             
             if (data.success) {
                 // Start polling for status of multi-part conversion
-                conversionId = data.conversion_id;
+                jobId = data.job_id;
                 startPolling();
             } else {
                 throw new Error(data.message || 'Conversion failed');
@@ -410,11 +415,26 @@ document.addEventListener('DOMContentLoaded', function() {
             fetch('/api/conversion-status', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ conversion_id: conversionId })
+                body: JSON.stringify({ job_id: jobId })
             })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
+                    // Update progress based on completed parts
+                    const progress = Math.round((data.completed / data.total) * 100);
+                    overallProgressBar.style.width = `${progress}%`;
+                    overallProgressBar.textContent = `${progress}%`;
+                    statusLabel.textContent = `Status: Processing (${data.completed}/${data.total})`;
+                    
+                    // Update individual progress bars
+                    for (let i = 0; i < data.completed; i++) {
+                        const progressBar = document.getElementById(`progress-${i}`);
+                        if (progressBar) {
+                            progressBar.style.width = '100%';
+                            progressBar.setAttribute('aria-valuenow', '100');
+                        }
+                    }
+                    
                     if (data.status === 'completed') {
                         // Conversion completed
                         clearInterval(pollInterval);
@@ -436,23 +456,22 @@ document.addEventListener('DOMContentLoaded', function() {
                             }
                         }
                     }
-                    // For in_progress, we just keep polling
                 } else {
-                    clearInterval(pollInterval);
-                    hideLoading();
-                    alert(`Error: ${data.message}`);
-                    convertBtn.disabled = false;
-                    latexMcqBtn.disabled = false;
+                    if (data.status === 'error') {
+                        clearInterval(pollInterval);
+                        hideLoading();
+                        statusLabel.textContent = `Status: Error - ${data.message}`;
+                        alert(`Error: ${data.message}`);
+                        convertBtn.disabled = false;
+                        latexMcqBtn.disabled = false;
+                    }
                 }
             })
             .catch(error => {
-                clearInterval(pollInterval);
-                hideLoading();
-                alert(`Error polling status: ${error.message}`);
-                convertBtn.disabled = false;
-                latexMcqBtn.disabled = false;
+                // Don't clear interval on network errors - retry
+                console.error(`Error polling status: ${error.message}`);
             });
-        }, 5000); // Poll every 5 seconds
+        }, 3000); // Poll every 3 seconds
     }
     
     function convertToWord() {
