@@ -80,7 +80,7 @@ def check_activation(hardware_id):
     """Kiểm tra xem hardware ID có được kích hoạt không"""
     try:
         url = "https://raw.githubusercontent.com/thayphuctoan/pconvert/refs/heads/main/convert-special-1"
-        response = requests.get(url, timeout=(10, 30))
+        response = requests.get(url, timeout=(30, 180))
         
         if response.status_code == 200:
             valid_ids = response.text.strip().split('\n')
@@ -95,7 +95,7 @@ def get_model_name():
     """Get the model name from GitHub or use default"""
     try:
         model_url = "https://raw.githubusercontent.com/thayphuctoan/pconvert/refs/heads/main/p_convert_model_2025"
-        response = requests.get(model_url, timeout=(10, 30))
+        response = requests.get(model_url, timeout=(30, 180))
         
         if response.status_code == 200:
             return response.text.strip()
