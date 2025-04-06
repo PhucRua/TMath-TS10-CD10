@@ -226,7 +226,7 @@ def upload_file():
                     result = process_file_with_gemini(file_path, api_key, 'text')
                     
                     # Create unique ID for this result
-                    timestamp = int(time.time()))
+                    timestamp = int(time.time())
                     result_id = f"result_{os.path.splitext(filename)[0]}_{timestamp}.txt"
                     
                     # Save result to file
