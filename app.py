@@ -102,10 +102,10 @@ def get_model_name():
             return response.text.strip()
         
         # Fallback model name
-        return "gemini-1.5-pro-latest"
+        return "gemini-exp-1206"
     except Exception as e:
         app.logger.error(f"Error getting model name: {str(e)}")
-        return "gemini-1.5-pro-latest"
+        return "gemini-exp-1121"
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
